@@ -1,0 +1,25 @@
+/* Inline (feed) view. Keep light: no game logic beyond today's scenario. */
+@font-face { font-family: 'Cinzel'; font-weight: 800; src: url('./cinzel-latin-800-normal.woff2') format('woff2'); font-display: swap; }
+:root { --ink:#2b2115; --paper:#f3ead6; --muted:#7a6a4f; --red:#8b1a1a; }
+* { box-sizing: border-box; }
+html, body, #root { height: 100%; margin: 0; }
+body { background: var(--paper); color: var(--ink); font-family: Georgia, 'Times New Roman', serif; overflow: hidden; }
+.splash { position: relative; height: 100%; display: flex; align-items: center; justify-content: center; padding: 12px; }
+.minimap { position: absolute; inset: 0; width: 100%; height: 100%; opacity: .35; }
+.mm-road { stroke: #8a7a5a; stroke-width: .6; stroke-dasharray: 1.4 1.2; }
+.mm-town { stroke: #fff; stroke-width: .4; }
+.mm-castra { fill: var(--red); stroke: var(--ink); stroke-width: .8; }
+.card { position: relative; max-width: 420px; width: 100%; text-align: center; background: rgba(251, 246, 234, .92);
+  border: 1px solid #c9b88f; border-radius: 12px; padding: 14px 16px; box-shadow: 0 6px 24px rgba(59, 47, 30, .18); }
+h1 { margin: 0; font-family: 'Cinzel', Georgia, serif; font-weight: 800; font-size: clamp(20px, 6vw, 30px); letter-spacing: .04em;
+  background: linear-gradient(#fff3b0, #e8c25a 35%, #c9971f 55%, #e2b84a 75%, #8a5f0e); -webkit-background-clip: text; background-clip: text;
+  color: transparent; -webkit-text-stroke: .6px #4a3008; filter: drop-shadow(0 2px 1px rgba(43, 26, 5, .4)); }
+.sub { margin-top: 4px; font-size: 13px; color: var(--muted); }
+.decree { margin: 10px 0 12px; font-size: 13.5px; background: #efe2c2; border-left: 3px solid var(--red); padding: 6px 8px; text-align: left; }
+.fac { font-variant: small-caps; font-weight: bold; margin-right: 4px; }
+.fac.populares { color: #8b1a1a; } .fac.optimates { color: #1f5fa8; }
+.play { font: inherit; font-size: 16px; font-weight: bold; color: #fff; background: var(--red); border: 0; border-radius: 999px;
+  padding: 10px 26px; cursor: pointer; box-shadow: 0 3px 0 #5a1010; }
+.play:active { transform: translateY(2px); box-shadow: 0 1px 0 #5a1010; }
+.foot { margin-top: 10px; font-size: 12px; color: var(--muted); }
+.ver { margin-top:6px; font-size:10.5px; color:#a8987a; font-family:system-ui, sans-serif; }

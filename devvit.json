@@ -1,0 +1,84 @@
+{
+  "$schema": "https://developers.reddit.com/schema/config-file.v1.json",
+  "name": "all-roads-to-rome",
+  "post": {
+    "dir": "dist/client",
+    "entrypoints": {
+      "default": {
+        "inline": true,
+        "entry": "splash.html"
+      },
+      "game": {
+        "entry": "game.html"
+      }
+    }
+  },
+  "media": {
+    "dir": "public"
+  },
+  "server": {
+    "dir": "dist/server",
+    "entry": "index.cjs"
+  },
+  "menu": {
+    "items": [
+      {
+        "label": "Post today's campaign",
+        "description": "Create today's All Roads Lead to Rome post",
+        "location": "subreddit",
+        "forUserType": "moderator",
+        "endpoint": "/internal/menu/post-create"
+      }
+    ]
+  },
+  "permissions": {
+    "reddit": {
+      "enable": true,
+      "asUser": [
+        "SUBMIT_POST",
+        "SUBMIT_COMMENT",
+        "SUBSCRIBE_TO_SUBREDDIT"
+      ]
+    },
+    "redis": true
+  },
+  "triggers": {
+    "onAppInstall": "/internal/triggers/on-app-install"
+  },
+  "scripts": {
+    "dev": "vite build --watch",
+    "build": "vite build"
+  },
+  "scheduler": {
+    "tasks": {
+      "daily-post": {
+        "endpoint": "/internal/scheduler/daily-post",
+        "cron": "5 0 * * *"
+      }
+    }
+  },
+  "settings": {
+    "subreddit": {
+      "latePlay": {
+        "type": "select",
+        "label": "Playing past campaigns",
+        "helpText": "What happens when someone plays an older day's post. Late plays never extend streaks, and voting closes when the day ends.",
+        "options": [
+          {
+            "label": "Scored, marked as late (\u23f1) on that day's board",
+            "value": "flagged"
+          },
+          {
+            "label": "Scored but kept off the board (shows where it would place)",
+            "value": "ontime"
+          },
+          {
+            "label": "Practice only (not scored)",
+            "value": "practice"
+          }
+        ],
+        "defaultValue": "flagged"
+      }
+    }
+  }
+}

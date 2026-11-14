@@ -1,0 +1,19 @@
+node_modules
+.yarn
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.DS_Store
+webroot
+dist
+coverage
+.env
+.env.*
+
+# generated documents: only the root README is published
+# (fonts are build inputs of the rulebook; the stamp is checked by rulebook.test.ts)
+docs/*
+!docs/fonts/
+!docs/rulebook.stamp.json

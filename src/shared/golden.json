@@ -1,0 +1,13 @@
+{
+ "note": "Fingerprints of published days. Written by `npm run golden`; checked by golden.test.ts. Do not edit by hand.",
+ "days": {
+  "2026-11-13": {
+   "populares": "75c3c78f791edf04",
+   "optimates": "0e4c653841daa6ef"
+  },
+  "2026-11-14": {
+   "populares": "c4cdba65d5d7d307",
+   "optimates": "1122e0dc96c31342"
+  }
+ }
+}

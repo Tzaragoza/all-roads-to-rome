@@ -1,0 +1,1742 @@
+// All Roads Lead to Rome: game view (expanded post). Vanilla DOM + SVG rendered into a root element.
+import {
+  apply, budgetAsOf, checkAction, gambitOffers, townGlory, suppliedTowns, liveEvents, shores, decreeSpec, decreeStatus, eventSpec, eventsAsOf, isThreat, roadToll, townValue, replay, roadCost, forecastPreview, garrisonCost, initialState, isOver, protectedTowns, recruitCost,
+  cloneState, roadDistance, roadsCutBy, Rng, score, scoreCurve, supplied, townIncome, visibleEvents, yieldPerTurn,
+} from '../../shared/engine';
+import type { Action, Faction, GameEvent, Scenario, State, TownId } from '../../shared/engine';
+import { STEPS as TUT_STEPS, TUTORIAL } from './tutorial';
+import type { TutTarget } from './tutorial';
+import {
+  amphora, bowl, buildBoard, pirateShip, warband, castraIcon, cloud, coins, dagger, flame, K, MINI, miniKey, olive, pitchfork, purse, stakes, sickle, snowflake, polyD, settlement, settlementSize, sheaf, silverPeak, spotsIn, swords, TRIBE_ART,
+} from './board-art';
+import type { Board, Pt } from './board-art';
+import { play, setSound, soundOn } from './sfx';
+import { musicOn, setMusic, startMusicOnGesture } from './music';
+import { versionLabel } from './version';
+import { addDays, ballotFor, dailyScenario, prettyDate } from '../../shared/daily';
+
+const TRIBE_COL = ['#f0b81c', '#2f86e0', '#a24fd6', '#e8e8e8']; // = TRIBE_ART
+const TRIBE_INK = ['#2b2116', '#fff', '#fff', '#2b2116']; // readable text on each tribe colour
+const TRIBE_SYM = ['▲', '●', '■', '◆']; // = the marks on each tribe's border (not colour alone)
+/** A tribe's name as a coloured tag, matching its borders and region name on the map. */
+const tribeTag = (k: number, suffix = '') => k < 0 ? '<span class="tribe rome">Rome</span>'
+  : `<span class="tribe" data-tribe="${k}" style="background:${TRIBE_COL[k % TRIBE_COL.length]};color:${TRIBE_INK[k % TRIBE_INK.length]}" title="A Gallic tribe: tap to see its lands"><i class="tsym">${TRIBE_SYM[k % TRIBE_SYM.length]}</i>${sc.tribes[k]!.name}${suffix}</span>`;
+let root: HTMLElement;
+const $ = (id: string) => root.querySelector<HTMLElement>(`#${id}`)!;
+
+let sc: Scenario, s: State, undoStack: State[] = [], msg = '', par: number | null = null, sel: TownId | null = null;
+let lensOverride: 'map' | 'military' | null = null; // manual choice, cleared at end of turn
+let lens: 'map' | 'military' = 'map';
+let showRules = false;
+// ---- guided first campaign (tutorial.ts): the real game is set aside while it runs
+type Saved = { sc: Scenario; s: State; log: Action[]; undoStack: State[]; practice: boolean; par: number | null };
+let tut: { step: number; saved: Saved } | null = null;
+let tutPrompt = false;
+const TUT_KEY = 'arlr.tutorial';
+const tutorialDoneHere = () => { try { return !!localStorage.getItem(TUT_KEY); } catch { return false; } };
+// ---- end-turn confirmation, turn summary card, road preview
+let confirmEnd = false;
+let turnCard: string | null = null;
+/**
+ * Set when the stored result of this day cannot be replayed on the current game (the day's events or
+ * rules changed after it was played, e.g. during development). The stored score stands and is shown;
+ * the moves cannot be drawn.
+ */
+let staleResult = false;
+/** Gambit offers the player waved away (client only; an offer not accepted simply expires). */
+let declined = new Set<number>();
+/** A short vibration on phones (follows the sound switch). */
+function buzz(p: number | number[]) { try { if (sound && 'vibrate' in navigator) navigator.vibrate(p); } catch { /* unsupported */ } }
+let hlTribe: number | null = null; // tribe whose lands are highlighted (tap a tribe tag)
+let hlTimer: ReturnType<typeof setTimeout> | undefined;
+let decreeModal = false; // the Senate's decree, read before the campaign and on demand
+const decreeSeenKey = (d: string) => `arlr.decree.${d}`;
+const decreeSeen = (d: string) => { try { return localStorage.getItem(decreeSeenKey(d)) === '1'; } catch { return false; } };
+let dateLabel = '';
+let moving: number | null = null; // legion index in movement mode
+let sound = soundOn();
+let music = musicOn();
+
+function autoLens(): 'map' | 'military' {
+  const revolt = visibleEvents(sc, s.turn, s).some(isThreat);
+  const legionSelected = sel !== null && sel !== sc.castra && s.legions.includes(sel);
+  return revolt || legionSelected ? 'military' : 'map';
+}
+
+/** Server-side view of the day (from the tRPC `day.*` procedures). */
+export type DayView = {
+  par: number | null;
+  username: string | null;
+  me: { total: number; actions: Action[]; glory?: number; decreeMet?: boolean; lost?: number; curve?: number[] } | null;
+  myVote: Faction | null;
+  votes: Record<Faction, number>;
+  streak: { streak: number; best: number; played: number } | null;
+  leaderboard: { board: Array<{ rank: number; username: string; score: number; late?: boolean }>; players: number; me: { rank: number; late?: boolean } | null };
+  /** Late-play rule of the subreddit, whether this post's day is over, and (rule "ontime") where a late play would place. */
+  policy?: 'flagged' | 'ontime' | 'practice';
+  late?: boolean;
+  offBoard?: number | null;
+  today?: string;
+  tutorialDone?: boolean;
+  tutorialStats?: Record<string, number> | null;
+  isMod?: boolean;
+  rivals?: Array<{ username: string; score: number | null; rank: number | null; streak: number; curve?: number[] | null; best?: number | null; tries?: number }>;
+  /** Unranked practice runs of this day: every score (newest last, capped), the best run's curve, and the total count. */
+  practice?: PracticeView | null;
+};
+export type PracticeView = { runs: Array<{ total: number; at: number }>; best: { total: number; curve: number[]; at: number } | null; count: number };
+/** Reddit features, injected by the host page so this module stays platform-agnostic. */
+export type Social = {
+  finish(actions: Action[]): Promise<DayView>;
+  vote(f: Faction): Promise<DayView>;
+  share(mentions: string[]): Promise<void>;
+  follow(username: string, follow: boolean): Promise<DayView>;
+  challenge(score: number): Promise<void>;
+  subscribe(): Promise<void>;
+  reset(scope: 'me' | 'day'): Promise<DayView>;
+  history(): Promise<HistoryDay[]>;
+  rivalPlan?(username: string): Promise<Action[] | null>;
+  /** Record a finished practice run (unranked). */
+  practice?(actions: Action[]): Promise<DayView>;
+  openPost(postId: string): void;
+  tutorial?(event: 'start' | 'done' | 'skip', step: string): Promise<void>;
+};
+export type HistoryDay = {
+  date: string; par: number | null; postId: string | null; players: number;
+  me: { total: number; late: boolean; rank: number | null } | null;
+  rivals: Array<{ username: string; score: number }>;
+};
+export type GameOptions = { scenario: Scenario; par: number | null; date: string; social?: Social; day?: DayView | null;
+  challengedBy?: { from: string; score: number } | null };
+
+let social: Social | undefined;
+let day: DayView | null = null;
+let log: Action[] = [];
+let socialMsg = '';
+let msgTimer: ReturnType<typeof setTimeout> | undefined;
+/** Show a transient message: closes on ×, fades on its own. */
+function say(text: string, ms: number) {
+  msg = text;
+  if (msgTimer) clearTimeout(msgTimer);
+  if (text) msgTimer = setTimeout(() => { msg = ''; render(); }, ms);
+}
+let busy = false;
+let shared = false;
+let joined = false;
+let view: 'map' | 'results' = 'map';
+let practice = false; // replaying an already-scored day: nothing is submitted
+let official: State | null = null; // final state of the scored game (for the results page)
+/** Side-by-side replay with a rival (after finishing): your state and theirs after each turn. */
+type Compare = { name: string; mine: State[]; theirs: State[]; k: number };
+let compare: Compare | null = null;
+let cmpRival: State | null = null; // read by svg() while the comparison is drawn
+let confirmReset: 'me' | 'day' | null = null;
+const mentionSel = new Set<string>();
+let rivalInput = '';
+let challengedBy: { from: string; score: number } | null = null;
+
+/** Mount the game into `el`. Returns a cleanup function. */
+// Landscape screens show the same board rotated a quarter turn (castra on the left). Only the
+// drawing changes: the rules use the road graph, never coordinates, so the puzzle is identical.
+const WIDE_QUERY = '(min-aspect-ratio: 1/1) and (min-width: 820px)'; // keep in sync with game.css
+const TOUCH_QUERY = '(pointer: coarse)';
+let wideMq: MediaQueryList | null = null;
+// Optional "turn the phone" mode: the whole UI is rotated a quarter turn in CSS, so it works
+// even when the Reddit app keeps its webview in portrait. Off by default; remembered per device.
+const PHONE_SIDEWAYS = '<svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><rect x="2.5" y="7" width="19" height="10" rx="2"/><path d="M6 4.5a8 8 0 0 1 9-1"/><path d="M14.5 1.5l.6 2.2-2.2.4"/></svg>';
+const PHONE_UPRIGHT = '<svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><rect x="7" y="2.5" width="10" height="19" rx="2"/></svg>';
+let sideways = false;
+try { sideways = localStorage.getItem('arlr.sideways') === '1'; } catch { /* storage unavailable */ }
+const nativeWide = () => wideMq?.matches ?? false;
+const isTouch = () => (typeof window.matchMedia === 'function' ? window.matchMedia(TOUCH_QUERY).matches : false);
+function setSideways(on: boolean) {
+  sideways = on;
+  try { localStorage.setItem('arlr.sideways', on ? '1' : '0'); } catch { /* ignore */ }
+  rotated = null;
+  render();
+}
+// Board orientation is chosen from the map area's shape: whichever draws the province larger.
+let rotated: Scenario | null = null;
+let boardRotated = false;
+let mapArea = { w: 0, h: 0 };
+
+function rotatedScenario(): Scenario {
+  rotated ??= { ...sc, towns: sc.towns.map((t) => ({ ...t, x: sc.height - t.y, y: t.x })) };
+  return rotated;
+}
+/** UI scale for a base zoom (screen px per art px): small maps get bigger nodes and labels. */
+const uiScale = (zoom: number) => Math.max(1, Math.min(1.6, 0.85 / zoom));
+/**
+ * Box around everything drawn for a town, in art pixels at UI scale 1, relative to the town:
+ * settlement, name above, stars and the event-icon row below, one legion standard to the right.
+ * Uses the town's base value so the frame never moves during a game.
+ */
+function labelBox(t: Scenario['towns'][number]) {
+  const nameW = t.name.length * 14 * 0.62 + 8; // Georgia bold 14px, halo included
+  if (t.id === sc.castra) return { top: 44, bottom: 28, left: Math.max(40, nameW / 2), right: Math.max(40, nameW / 2) + 30 };
+  const z = settlementSize(t.value);
+  const sh = shores(sc), nb = (sh.coast[t.id] ? 1 : 0) + (sh.frontier[t.id] ? 1 : 0);
+  const v = Math.min(5, t.value + 1), row = v * 12.4 + 6 + Math.max(0, townIncome(sc, v)) * 12; // stars (+ a boom) and coins
+  const half = Math.max(z.top * 1.1, nameW / 2, row / 2);
+  return { top: z.top + 4 + 13, bottom: z.bottom + 33 + 12, left: Math.max(half, nb ? nameW / 2 + 2 + nb * 20 : 0), right: Math.max(half, z.top * 0.8 + 4 + 20) };
+}
+/**
+ * The map's frame in board units: the extent of every town's drawing, so no name, star or
+ * standard is ever clipped, whichever way the board is turned. The UI scale depends on the
+ * frame and the frame on the UI scale, so it is solved by a short fixed-point iteration.
+ */
+function frame(v: Scenario) {
+  const PAD = 1.5; // board units of breathing room
+  const at = (u: number) => {
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    for (const t of v.towns) {
+      const b = labelBox(t), k = u / K;
+      x0 = Math.min(x0, t.x - b.left * k); x1 = Math.max(x1, t.x + b.right * k);
+      y0 = Math.min(y0, t.y - b.top * k); y1 = Math.max(y1, t.y + b.bottom * k);
+    }
+    return { x: x0 - PAD, y: y0 - PAD, w: x1 - x0 + 2 * PAD, h: y1 - y0 + 2 * PAD };
+  };
+  let u = 1.6, f = at(u);
+  for (let i = 0; i < 3 && mapArea.w && mapArea.h; i++) {
+    const nu = uiScale(Math.min(mapArea.w / f.w, mapArea.h / f.h) / K);
+    if (Math.abs(nu - u) < 0.01) break;
+    u = nu; f = at(u);
+  }
+  return { ...f, u };
+}
+function chooseOrientation(): boolean {
+  // Phones and tablets: never flip on their own (a panel growing or shrinking used to turn the
+  // board mid-game). Upright in portrait; turned only when the player holds the device sideways or
+  // taps the landscape button.
+  if (isTouch()) return sideways || window.innerWidth > window.innerHeight * 1.15;
+  const { w, h } = mapArea;
+  if (!w || !h) return boardRotated;
+  const a = frame(sc), b = frame(rotatedScenario());
+  const scaleUpright = Math.min(w / a.w, h / a.h), scaleRot = Math.min(w / b.w, h / b.h);
+  // hysteresis: only switch when clearly better, so small resizes don't flip the board
+  return boardRotated ? scaleRot > scaleUpright * 0.95 : scaleRot > scaleUpright * 1.05;
+}
+function viewScenario(): Scenario {
+  return boardRotated ? rotatedScenario() : sc;
+}
+
+export function mountGame(el: HTMLElement, opts: GameOptions): () => void {
+  root = el;
+  root.innerHTML = '<div id="app"></div>';
+  music = musicOn();
+  root.addEventListener('pointerdown', () => startMusicOnGesture(), { once: true });
+  sc = opts.scenario; par = opts.par; dateLabel = opts.date;
+  s = initialState(sc); undoStack = []; msg = ''; sel = null; moving = null; lensOverride = null; rotated = null;
+  social = opts.social; day = opts.day ?? null; log = []; declined = new Set(); socialMsg = ''; busy = false; shared = false; joined = false;
+  view = 'map'; practice = false; practiceNote = null; official = null; confirmReset = null; mentionSel.clear(); rivalInput = '';
+  challengedBy = opts.challengedBy ?? null;
+  history = null; historyState = 'idle';
+  decreeModal = false;
+  if (challengedBy && !opts.day?.me) say(`⚔️ u/${esc(challengedBy.from)} challenges you: beat ${challengedBy.score}!`, 9000);
+  if (!day?.me && day?.late && day.policy === 'practice') {
+    practice = true;
+    say(`This is the campaign of ${prettyDate(dateLabel)}. Past campaigns are practice only here: nothing is scored.`, 8000);
+  } else if (!day?.me && day?.late) {
+    say(day.policy === 'ontime'
+      ? `Campaign of ${prettyDate(dateLabel)}, played late: it is scored, but stays off that day's leaderboard.`
+      : `Campaign of ${prettyDate(dateLabel)}, played late: your score will carry a ⏱ on that day's board. Late plays don't extend streaks.`, 8000);
+  }
+  if (day?.me) {
+    // already played today: open on the results page; the final board is one tap away
+    staleResult = false;
+    try { s = replay(sc, day.me.actions); log = day.me.actions.slice(); official = s; } catch { s = initialState(sc); staleResult = true; }
+    view = 'results';
+  }
+  tut = null; confirmEnd = false; turnCard = null;
+  tutPrompt = view === 'map' && !day?.me && !(day?.tutorialDone ?? false) && !tutorialDoneHere();
+  if (view === 'map' && !day?.me && !decreeSeen(dateLabel) && !tutPrompt) decreeModal = true;
+  wideMq = typeof window.matchMedia === 'function' ? window.matchMedia(WIDE_QUERY) : null;
+  const onResize = () => render();
+  wideMq?.addEventListener('change', onResize);
+  // re-render when the map area changes shape enough to prefer the other orientation
+  const ro = typeof ResizeObserver === 'function' ? new ResizeObserver(() => {
+    const el = root.querySelector<HTMLElement>('.mapwrap');
+    if (!el) return;
+    mapArea = { w: el.clientWidth, h: el.clientHeight };
+    if (chooseOrientation() !== boardRotated) render();
+  }) : null;
+  ro?.observe($('app'));
+  render();
+  return () => { ro?.disconnect(); wideMq?.removeEventListener('change', onResize); root.innerHTML = ''; };
+}
+
+function act(a: Action) {
+  if (tut) {
+    const step = TUT_STEPS[tut.step]!;
+    if (!(step.allow?.(a) ?? false)) { say('Follow the highlighted step, or skip the tutorial.', 2500); buzz([10, 40, 10]); render(); return; }
+  }
+  if (a.type === 'end' && !tut && !confirmEnd) {
+    const pv = forecastPreview(sc, s);
+    if (pv && pv.turn === s.turn && pv.cut.length) { confirmEnd = true; buzz(15); render(); return; } // a second tap confirms
+  }
+  confirmEnd = false;
+  const err = checkAction(sc, s, a);
+  if (err) { say(`⚠ ${err}`, 3000); play('error'); buzz([10, 40, 10]); render(); return; }
+  buzz(a.type === 'road' ? 12 : a.type === 'end' ? 18 : 20);
+  const before = s;
+  if (a.type === 'end') undoStack = []; else undoStack.push(s);
+  s = apply(sc, s, a);
+  log.push(a);
+  if (isOver(sc, s)) void finish();
+  if (a.type !== 'end') play(a.type === 'camp' ? 'march' : a.type === 'accept' ? 'garrison' : a.type);
+  if (a.type === 'end') {
+    sel = null; lensOverride = null; moving = null;
+    const rec = s.history[s.history.length - 1]!;
+    play(rec.burned.length ? 'burn' : rec.cut.length ? 'revolt' : 'turn');
+    if (isOver(sc, s) && par !== null && score(sc, s).total >= par) setTimeout(() => play('win'), 700);
+    showTurnCard(before, rec);
+    if (rec.cut.length || rec.burned.length) buzz([40, 60, 40]);
+    say('', 0);
+  } else say('', 0);
+  render();
+}
+
+/**
+ * One slim line in the panel, never over the map: the marching instruction, else the last message,
+ * else what the last turn did. Replaces the old pop-ups (hints, turn card, toasts).
+ */
+function statusLine(): string {
+  if (moving !== null && !tut) return `<div class="status move" style="--leg:${LEGION_COL[moving % LEGION_COL.length]}"><span class="legtag">${ROMAN[moving] ?? moving + 1}</span> Tap a ringed town to march · tap the standard again to cancel</div>`;
+  if (msg && !tut) return `<div class="status msg2"><span>${msg}</span><button id="msgx" aria-label="Close">×</button></div>`;
+  return turnCard ? `<div class="status last">${turnCard}</div>` : '';
+}
+
+/** What the turn that just ended did, as one line for the status line. */
+function showTurnCard(before: State, rec: State['history'][number]) {
+  const bits: string[] = [`<b>Turn ${before.turn}:</b> +${rec.glory} glory · +${rec.income} denarii`];
+  const hit = [...new Set(liveEvents(sc, before).filter((e) => e.turn === before.turn && isThreat(e) && e.kind !== 'idus').map((e) => e.tribe))].map((t) => tribeTag(t));
+  if (rec.cut.length) bits.push(`<span class="bad">⚔ ${rec.cut.length} road${rec.cut.length > 1 ? 's' : ''} cut${hit.length ? ` by ${hit.join(' ')}` : ''}</span>`);
+  for (const t of rec.burned) bits.push(`<span class="bad">🔥 ${sc.towns[t]!.name} burned</span>`);
+  if (rec.lostLegions.length) bits.push(`<span class="bad">⚑ ${rec.lostLegions.length} legion${rec.lostLegions.length > 1 ? 's' : ''} lost</span>`);
+  sc.towns.forEach((t) => { if (s.siege[t.id]! > 0 && !before.siege[t.id]) bits.push(`<span class="warn">⏳ ${t.name} cut off: relink within ${s.siege[t.id]} turn${s.siege[t.id]! > 1 ? 's' : ''}</span>`); });
+  turnCard = bits.join(' · ');
+}
+
+function undo() { const p = undoStack.pop(); if (p) { s = p; log.pop(); msg = ''; moving = null; render(); } }
+
+// ---- tutorial
+function tutView() { return { s, moving }; }
+function tutTarget(): TutTarget | null {
+  if (!tut) return null;
+  const t = TUT_STEPS[tut.step]!.target;
+  return t ? (typeof t === 'function' ? t(tutView()) : t) : null;
+}
+/** Move past every step whose goal is already met. */
+function tutCheck() {
+  if (!tut) return;
+  while (tut.step < TUT_STEPS.length && TUT_STEPS[tut.step]!.done?.(tutView())) tut.step++;
+}
+function startTutorial() {
+  const saved: Saved = { sc, s, log, undoStack, practice, par };
+  sc = TUTORIAL; par = null; s = initialState(sc); log = []; declined = new Set(); undoStack = []; practice = true;
+  sel = null; moving = null; lensOverride = null; rotated = null; view = 'map';
+  tutPrompt = false; decreeModal = false; showRules = false; turnCard = null; confirmEnd = false; msg = '';
+  tut = { step: 0, saved };
+  void social?.tutorial?.('start', TUT_STEPS[0]!.id).catch(() => undefined);
+  render();
+}
+function endTutorial(how: 'done' | 'skip') {
+  const step = tut ? TUT_STEPS[Math.min(tut.step, TUT_STEPS.length - 1)]!.id : 'prompt';
+  if (tut) ({ sc, s, log, undoStack, practice, par } = tut.saved);
+  tut = null; tutPrompt = false; sel = null; moving = null; lensOverride = null; rotated = null; turnCard = null; msg = '';
+  try { localStorage.setItem(TUT_KEY, how); } catch { /* storage unavailable */ }
+  void social?.tutorial?.(how, step).catch(() => undefined);
+  if (day) day.tutorialDone = true;
+  if (!day?.me && !decreeSeen(dateLabel)) decreeModal = true; // first visit: the decree comes next
+  render();
+}
+
+async function finish() {
+  if (practice) { if (!tut) void finishPractice(); return; }
+  official = s;
+  if (!social || day?.me) return;
+  busy = true; socialMsg = 'Sending your report to the Senate…';
+  try { day = await social.finish(log.slice()); socialMsg = ''; }
+  catch (e) { socialMsg = (e as Error).message || 'Could not save your score'; }
+  busy = false; render();
+}
+
+async function doReset(scope: 'me' | 'day') {
+  if (!social || busy) return;
+  if (confirmReset !== scope) { confirmReset = scope; render(); return; } // second tap confirms
+  confirmReset = null; busy = true; render();
+  try {
+    day = await social.reset(scope);
+    s = initialState(sc); log = []; declined = new Set(); undoStack = []; official = null; practice = false; shared = false;
+    view = 'map'; socialMsg = scope === 'me' ? 'Your game was wiped: play again.' : "Today's board was wiped.";
+    say(socialMsg, 4000);
+  } catch (e) { socialMsg = (e as Error).message; }
+  busy = false; render();
+}
+
+/** Personal-best note of the last practice run: set when it beat every earlier score of the day. */
+let practiceNote: { total: number; pb: boolean; prev: number | null } | null = null;
+async function finishPractice() {
+  const total = score(sc, s).total;
+  const prev = myBest();
+  practiceNote = { total, pb: prev === null || total > prev, prev };
+  if (!social?.practice || !day?.username) return; // offline: the note still shows, nothing is kept
+  busy = true; render();
+  try { day = await social.practice(log.slice()); socialMsg = ''; }
+  catch (e) { socialMsg = (e as Error).message || 'Could not keep your practice run'; }
+  busy = false; render();
+}
+/** Best score of the day so far: the official run or any kept practice run. */
+function myBest(): number | null {
+  const xs = [day?.me?.total ?? null, day?.practice?.best?.total ?? null].filter((x): x is number => x !== null);
+  return xs.length ? Math.max(...xs) : null;
+}
+
+function startPractice() {
+  practiceNote = null;
+  practice = true; s = initialState(sc); log = []; declined = new Set(); undoStack = []; sel = null; moving = null;
+  view = 'map'; say('Practice run: nothing is scored.', 4000); render();
+}
+
+async function doVote(f: Faction) {
+  if (!social || busy) return;
+  busy = true; render();
+  try { day = await social.vote(f); socialMsg = ''; } catch (e) { socialMsg = (e as Error).message; }
+  busy = false; render();
+}
+
+async function doShare() {
+  if (!social || busy || shared) return;
+  busy = true; render();
+  try {
+    await social.share([...mentionSel]); shared = true;
+    socialMsg = mentionSel.size ? `Posted, and ${[...mentionSel].map((m) => 'u/' + m).join(', ')} will be notified.` : 'Your report is posted in the comments.';
+    mentionSel.clear();
+  } catch (e) { socialMsg = (e as Error).message || 'Could not post the comment'; }
+  busy = false; render();
+}
+
+async function doFollow(name: string, follow: boolean) {
+  if (!social || busy || !name.trim()) return;
+  busy = true; render();
+  try { day = await social.follow(name.trim(), follow); socialMsg = ''; if (follow) rivalInput = ''; } catch (e) { socialMsg = (e as Error).message; }
+  busy = false; render();
+}
+
+async function doChallenge() {
+  if (!social) return;
+  try { await social.challenge(score(sc, official ?? s).total); } catch (e) { socialMsg = (e as Error).message; render(); }
+}
+
+async function doJoin() {
+  if (!social || busy || joined) return;
+  busy = true; render();
+  try { await social.subscribe(); joined = true; } catch (e) { socialMsg = (e as Error).message; }
+  busy = false; render();
+}
+
+
+const ROMAN = ['I', 'II', 'III', 'IV', 'V', 'VI', 'VII', 'VIII'];
+// legion colours avoid red (revolt warnings) and green (harvest)
+const LEGION_COL = ['#1f5fa8', '#c27c0e', '#7a3fa0', '#0f7c80', '#a0457a', '#555'];
+
+/** Towns each legion can still reach this turn (empty if it already marched or is cut off). */
+function legionReach(sup: boolean[]): Array<Set<number>> {
+  return s.legions.map((from, i) => {
+    const out = new Set<number>();
+    if (s.moved[i] || !sup[from]) return out;
+    const d = roadDistance(sc, s, from);
+    for (const t of sc.towns) if (t.id !== from && sup[t.id] && d[t.id]! <= sc.rules.legionRange) out.add(t.id);
+    return out;
+  });
+}
+
+// ---- board art: static tiles cached per day and orientation, re-attached after each render
+let boardCache: { key: string; board: Board; node: SVGSVGElement | null } | null = null;
+function getBoard(): Board {
+  const key = `${sc.seed}|${boardRotated}`;
+  if (boardCache?.key !== key) boardCache = { key, board: buildBoard(sc, boardRotated), node: null };
+  return boardCache.board;
+}
+function boardNode(vb: string): SVGSVGElement {
+  const b = getBoard();
+  if (!boardCache!.node) {
+    const tpl = document.createElement('template');
+    tpl.innerHTML = `<svg viewBox="${vb}" preserveAspectRatio="xMidYMid meet" class="board" aria-hidden="true">${b.markup}</svg>`;
+    boardCache!.node = tpl.content.firstElementChild as SVGSVGElement;
+  }
+  if (boardCache!.node.getAttribute('viewBox') !== vb) boardCache!.node.setAttribute('viewBox', vb);
+  return boardCache!.node;
+}
+// ---- pinch / drag / wheel zoom. The camera is a zoom factor and a centre in board units; it
+// only changes the viewBox of the two map layers, so gestures never re-render the map.
+const cam = { z: 1, cx: NaN, cy: NaN, key: '' };
+const ZMAX = 4;
+function camBox(fr: { x: number; y: number; w: number; h: number }) {
+  const key = `${sc.seed}|${boardRotated}`;
+  if (cam.key !== key) { cam.key = key; cam.z = 1; cam.cx = NaN; }
+  const w = fr.w / cam.z, h = fr.h / cam.z;
+  if (Number.isNaN(cam.cx)) { cam.cx = fr.x + fr.w / 2; cam.cy = fr.y + fr.h / 2; }
+  cam.cx = Math.min(fr.x + fr.w - w / 2, Math.max(fr.x + w / 2, cam.cx));
+  cam.cy = Math.min(fr.y + fr.h - h / 2, Math.max(fr.y + h / 2, cam.cy));
+  return { x: cam.cx - w / 2, y: cam.cy - h / 2, w, h };
+}
+const vbStr = (b: { x: number; y: number; w: number; h: number }) => `${b.x.toFixed(2)} ${b.y.toFixed(2)} ${b.w.toFixed(2)} ${b.h.toFixed(2)}`;
+function applyCam() {
+  const vb = vbStr(camBox(frame(viewScenario())));
+  root.querySelector('#map')?.setAttribute('viewBox', vb);
+  boardCache?.node?.setAttribute('viewBox', vb);
+  root.querySelector('#zoomreset')?.classList.toggle('show', cam.z > 1.02);
+  root.querySelector('.mapwrap')?.classList.toggle('zoomed', cam.z > 1.02);
+}
+let suppressClick = false;
+let camTimer: ReturnType<typeof setTimeout> | undefined;
+const settle = () => { if (camTimer) clearTimeout(camTimer); camTimer = setTimeout(() => render(), 160); };
+function wireZoom(wrap: HTMLElement) {
+  const pts = new Map<number, { x: number; y: number }>();
+  let start: { x: number; y: number } | null = null, moved = false, pinchD = 0;
+  const unitsPerPx = () => { const b = camBox(frame(viewScenario())); return Math.max(b.w / wrap.clientWidth, b.h / wrap.clientHeight); };
+  const turned = () => root.querySelector('#app')?.classList.contains('sideways') ?? false;
+  /** Screen offset -> offset in the map's own frame (sideways mode rotates the app 90° clockwise). */
+  const local = (dx: number, dy: number) => (turned() ? { x: dy, y: -dx } : { x: dx, y: dy });
+  const toBoard = (sx: number, sy: number) => {
+    const r = wrap.getBoundingClientRect(), upp = unitsPerPx(), o = local(sx - r.left - r.width / 2, sy - r.top - r.height / 2);
+    return { x: cam.cx + o.x * upp, y: cam.cy + o.y * upp };
+  };
+  const zoomAt = (sx: number, sy: number, factor: number) => {
+    const p = toBoard(sx, sy);
+    cam.z = Math.min(ZMAX, Math.max(1, cam.z * factor));
+    const r = wrap.getBoundingClientRect(), upp = unitsPerPx(), o = local(sx - r.left - r.width / 2, sy - r.top - r.height / 2);
+    cam.cx = p.x - o.x * upp; cam.cy = p.y - o.y * upp;
+    applyCam();
+  };
+  wrap.addEventListener('pointerdown', (e) => {
+    pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (pts.size === 1) { start = { x: e.clientX, y: e.clientY }; moved = false; }
+    if (pts.size === 2) { const [a, b] = [...pts.values()]; pinchD = Math.hypot(a!.x - b!.x, a!.y - b!.y); moved = true; }
+  });
+  wrap.addEventListener('pointermove', (e) => {
+    const prev = pts.get(e.pointerId);
+    if (!prev) return;
+    const cur = { x: e.clientX, y: e.clientY };
+    if (pts.size >= 2) {
+      pts.set(e.pointerId, cur);
+      const [a, b] = [...pts.values()];
+      const d = Math.hypot(a!.x - b!.x, a!.y - b!.y);
+      if (pinchD > 0) zoomAt((a!.x + b!.x) / 2, (a!.y + b!.y) / 2, d / pinchD);
+      pinchD = d;
+      return;
+    }
+    if (!moved && start && Math.hypot(cur.x - start.x, cur.y - start.y) < 8) return; // still a tap
+    moved = true;
+    if (cam.z > 1) { const upp = unitsPerPx(), o = local(cur.x - prev.x, cur.y - prev.y); cam.cx -= o.x * upp; cam.cy -= o.y * upp; applyCam(); }
+    pts.set(e.pointerId, cur);
+  });
+  const end = (e: PointerEvent) => {
+    if (!pts.delete(e.pointerId)) return;
+    if (pts.size === 0) { if (moved) { suppressClick = true; setTimeout(() => (suppressClick = false), 0); settle(); } start = null; pinchD = 0; }
+    if (pts.size === 1) pinchD = 0;
+  };
+  wrap.addEventListener('pointerup', end);
+  wrap.addEventListener('pointercancel', end);
+  wrap.addEventListener('dblclick', (e) => { zoomAt(e.clientX, e.clientY, 2); settle(); });
+  wrap.addEventListener('wheel', (e) => { e.preventDefault(); zoomAt(e.clientX, e.clientY, Math.exp(-e.deltaY * 0.0015)); settle(); }, { passive: false });
+}
+function attachBoard() {
+  const slot = root.querySelector('.bgslot'), map = root.querySelector('#map');
+  if (slot && map) slot.appendChild(boardNode(map.getAttribute('viewBox')!));
+}
+
+const n1 = (x: number) => x.toFixed(1);
+/** Wheat field overlay for a tile (deterministic per tile). */
+function wheat(tile: Pt[], seed: string): string {
+  const rng = new Rng(seed), c = { x: tile.reduce((a, p) => a + p.x, 0) / tile.length, y: tile.reduce((a, p) => a + p.y, 0) / tile.length };
+  const th = rng.next() * Math.PI, u = { x: Math.cos(th), y: Math.sin(th) }, v = { x: -u.y, y: u.x };
+  const pal = ['#efc94a', '#e2b232', '#f5d966', '#d9a72a'];
+  let g = '', o = -300;
+  while (o < 300) {
+    const w = 8 + rng.next() * 6, col = pal[Math.floor(rng.next() * pal.length)]!;
+    const a = { x: c.x + v.x * o - u.x * 400, y: c.y + v.y * o - u.y * 400 }, b = { x: c.x + v.x * o + u.x * 400, y: c.y + v.y * o + u.y * 400 };
+    g += `<path d="M${n1(a.x)},${n1(a.y)} L${n1(b.x)},${n1(b.y)} L${n1(b.x + v.x * w)},${n1(b.y + v.y * w)} L${n1(a.x + v.x * w)},${n1(a.y + v.y * w)} Z" fill="${col}"/>`;
+    o += w;
+  }
+  return g;
+}
+
+function svg(): string {
+  const v = viewScenario(); // same graph, display coordinates for this screen shape
+  const B = getBoard(), P = B.town;
+  // UI scale: grow nodes, labels and roads when the map gets few screen pixels (phone, post view)
+  const fr0 = frame(v);
+  const u = cam.z > 1.001 ? uiScale((mapArea.w && mapArea.h ? Math.min(mapArea.w / fr0.w, mapArea.h / fr0.h) / K : 0.5) * cam.z) : fr0.u;
+  const about = (x: number, y: number, inner: string) => `<g transform="translate(${n1(x)} ${n1(y)}) scale(${u.toFixed(3)}) translate(${n1(-x)} ${n1(-y)})">${inner}</g>`;
+  const sup = supplied(sc, s), prot = protectedTowns(sc, s), pv = forecastPreview(sc, s);
+  const threatened = new Set(pv?.cut ?? []), stranded = new Set(pv?.stranded ?? []);
+  const mil = lens === 'military';
+  const ev = visibleEvents(sc, s.turn, s);
+  const out: string[] = [];
+  const clipFor = (i: number) => `url(#tc${i})`;
+  const defs: string[] = [];
+  const clipped = new Set<number>();
+  const clip = (i: number) => { if (!clipped.has(i) && B.tile[i]) { clipped.add(i); defs.push(`<clipPath id="tc${i}"><path d="${polyD(B.tile[i]!)}"/></clipPath>`); } return clipFor(i); };
+  const tribeTowns = (k: number) => sc.towns.filter((t) => t.id !== sc.castra && t.tribe === k && B.tile[t.id]).map((t) => t.id);
+  const icons = new Map<number, Array<{ kind: string; now: boolean }>>();
+  const addIcon = (t: number, kind: string, now: boolean) => { const l = icons.get(t) ?? []; if (!l.some((x) => x.kind === kind)) l.push({ kind, now }); icons.set(t, l); };
+  const touches = (rid: number, t: number) => sc.roads[rid]!.a === t || sc.roads[rid]!.b === t;
+  const avoid = P;
+
+  // ---- event overlays on the tiles (decoration only; never intercept taps)
+  const fx: string[] = [];
+  // a toll's look: alliance (discount), snow (terrain-limited), or rain
+  const tollKind = (t: { surcharge: number; terrain?: unknown }) => (t.surcharge < 0 ? 'alliance' : t.terrain ? 'snows' : 'toll');
+  const tollArt = (kind: string, i: number, faint: boolean) => {
+    const op = faint ? ' opacity=".75"' : '';
+    if (kind === 'alliance') {
+      if (!faint) fx.push(`<path d="${polyD(B.tile[i]!)}" class="allytint"/>`);
+      for (const p of spotsIn(B.tile[i]!, `${sc.seed}/ally/${i}`, 2, 34, avoid, 44)) fx.push(`<g${op}>${olive(p.x, p.y, 1.6)}</g>`);
+    } else if (kind === 'snows') {
+      if (!faint) fx.push(`<path d="${polyD(B.tile[i]!)}" fill="url(#snowHatch)"/>`);
+      for (const p of spotsIn(B.tile[i]!, `${sc.seed}/snow/${i}`, 3, 28, avoid, 40)) fx.push(`<g${op}>${snowflake(p.x, p.y, 1.3)}</g>`);
+    } else {
+      if (!faint) fx.push(`<path d="${polyD(B.tile[i]!)}" fill="url(#rainHatch)"/>`);
+      for (const p of spotsIn(B.tile[i]!, `${sc.seed}/rain/${i}`, 1, 40, avoid, 50)) fx.push(`<g${op}>${cloud(p.x, p.y)}</g>`);
+    }
+  };
+  for (const x of (s.tolls ?? []).filter((x) => s.turn <= x.until)) for (const i of tribeTowns(x.tribe)) {
+    tollArt(tollKind(x), i, false);
+    if (sc.roads.some((r) => touches(r.id, i) && !s.built[r.id] && !s.rubble[r.id])) addIcon(i, tollKind(x), true);
+  }
+  for (const e of ev) {
+    const now = e.turn === s.turn;
+    const eff = e.effect;
+    if (eff.type === 'toll') {
+      for (const i of tribeTowns(e.tribe)) {
+        tollArt(tollKind(eff), i, true);
+        if (sc.roads.some((r) => touches(r.id, i) && !s.built[r.id] && !s.rubble[r.id])) addIcon(i, tollKind(eff), now);
+      }
+    } else if (eff.type === 'gambit') {
+      const i = sc.events.indexOf(e);
+      if (!(s.accepted ?? []).includes(i) && !declined.has(i)) for (const t of e.town !== undefined ? [e.town] : tribeTowns(e.tribe)) if (B.tile[t]) addIcon(t, 'gambit', now);
+    } else if (eff.type === 'settle' && e.town !== undefined && B.tile[e.town]) {
+      fx.push(`<ellipse cx="${n1(P[e.town]!.x)}" cy="${n1(P[e.town]!.y + 6)}" rx="44" ry="26" class="settleghost"/>`);
+      const sp = spotsIn(B.tile[e.town]!, `${sc.seed}/vet/${e.town}`, 1, 40, avoid, 42)[0];
+      if (sp) fx.push(`<g clip-path="${clip(e.town)}">${stakes(sp.x, sp.y, 1.8)}</g>`);
+      addIcon(e.town, 'veterans', now);
+    } else if (eff.type === 'purse') {
+      for (const i of tribeTowns(e.tribe)) {
+        fx.push(`<g clip-path="${clip(i)}">${spotsIn(B.tile[i]!, `${sc.seed}/purse/${i}`, 1, 40, avoid, 40).map((p) => purse(p.x, p.y, 1.5)).join('')}</g>`);
+        if (sup[i]) addIcon(i, 'caravan', now);
+      }
+    } else if (eff.type === 'levy') {
+      for (const i of tribeTowns(e.tribe)) for (const p of spotsIn(B.tile[i]!, `${sc.seed}/levy/${i}`, 1, 40, avoid, 40)) fx.push(`<g clip-path="${clip(i)}" opacity="${now ? 1 : 0.75}">${amphora(p.x, p.y, 1.5)}</g>`);
+    } else if (eff.type === 'boom' && e.town !== undefined && B.tile[e.town]) {
+      const sp = spotsIn(B.tile[e.town]!, `${sc.seed}/silver/${e.town}`, 1, 40, avoid, 42)[0] ?? { x: P[e.town]!.x + 40, y: P[e.town]!.y + 22 };
+      fx.push(`<g clip-path="${clip(e.town)}">${silverPeak(sp.x, sp.y)}</g>`);
+      addIcon(e.town, 'boom', now);
+    } else if (eff.type === 'cut' && eff.mode === 'hub') { // Ides of March: daggers at the most-connected town
+      const rids = roadsCutBy(sc, s, e.tribe, 'hub', new Array<boolean>(sc.towns.length).fill(false));
+      const cnt = new Map<number, number>();
+      for (const r of rids) for (const t of [sc.roads[r]!.a, sc.roads[r]!.b]) cnt.set(t, (cnt.get(t) ?? 0) + 1);
+      const hub = [...cnt.entries()].sort((a, b) => b[1] - a[1])[0]?.[0];
+      if (hub !== undefined && P[hub]) { fx.push(dagger(P[hub]!.x + 34, P[hub]!.y - 30, 1.3 * u)); addIcon(hub, 'idus', now); }
+    } else if (eff.type === 'cut' && eff.mode !== 'all') {
+      const rid = roadsCutBy(sc, s, e.tribe, eff.mode, prot)[0];
+      if (rid !== undefined) {
+        const rd = sc.roads[rid]!, far = sc.towns[rd.a]!.hop >= sc.towns[rd.b]!.hop ? rd.a : rd.b, near = far === rd.a ? rd.b : rd.a;
+        const a = P[far]!, b = P[near]!, l = Math.hypot(b.x - a.x, b.y - a.y) || 1, p = { x: a.x + (b.x - a.x) * 0.3, y: a.y + (b.y - a.y) * 0.3 };
+        const art = eff.mode === 'cheapest' ? dagger : swords, key = eff.mode === 'cheapest' ? 'bandits' : 'raid';
+        fx.push(art(p.x - ((b.y - a.y) / l) * 26 * u, p.y + ((b.x - a.x) / l) * 26 * u, 1.1 * u));
+        addIcon(rd.a, key, now); addIcon(rd.b, key, now);
+      }
+    } else if (eff.type === 'cut') {
+      const druid = eff.pierce === 'garrison', where = eff.where, sh = where ? shores(sc)[where] : null;
+      const hit = roadsCutBy(sc, s, e.tribe, 'all', druid ? protectedTowns(sc, s, true) : prot, where);
+      const key = druid ? 'druids' : where === 'coast' ? 'pirates' : where === 'frontier' ? 'germani' : 'revolt';
+      for (const i of tribeTowns(e.tribe).filter((t) => !sh || sh[t])) {
+        const atRisk = hit.some((rid) => touches(rid, i));
+        fx.push(`<path d="${polyD(B.tile[i]!)}" class="revoltrim${now ? ' now' : ''}" clip-path="${clip(i)}"/>`);
+        const spots = spotsIn(B.tile[i]!, `${sc.seed}/revolt/${i}`, atRisk ? 4 : 2, 30, avoid, 40);
+        const prop = (p: Pt, k: number) => druid ? sickle(p.x, p.y, 1.5) : where === 'coast' ? pirateShip(p.x, p.y, 1.6) : where === 'frontier' ? warband(p.x, p.y, 1.6) : pitchfork(p.x, p.y, (k * 37) % 50 - 25);
+        fx.push(`<g clip-path="${clip(i)}">${spots.map((p, k) => (atRisk && k % 2 === 0 ? flame(p.x, p.y, 1.2) : prop(p, k))).join('')}</g>`);
+        if (atRisk) addIcon(i, key, now);
+      }
+    } else if (eff.type === 'yield' && eff.income < 1) { // famine
+      for (const i of tribeTowns(e.tribe)) {
+        if (now) fx.push(`<path d="${polyD(B.tile[i]!)}" fill="url(#dryHatch)"/>`);
+        fx.push(`<g clip-path="${clip(i)}">${spotsIn(B.tile[i]!, `${sc.seed}/famine/${i}`, 1, 40, avoid, 40).map((p) => bowl(p.x, p.y, 1.5)).join('')}</g>`);
+        if (sup[i]) addIcon(i, 'famine', now);
+      }
+    } else if (eff.type === 'yield') {
+      for (const i of tribeTowns(e.tribe)) {
+        if (e.kind === 'harvest' || eff.glory > 1) {
+          fx.push(`<g clip-path="${clip(i)}" opacity="${now ? 0.85 : 0.55}">${wheat(B.tile[i]!, `${sc.seed}/wheat/${i}`)}</g>`);
+          fx.push(`<g clip-path="${clip(i)}">${spotsIn(B.tile[i]!, `${sc.seed}/sheaf/${i}`, 3, 26, avoid, 34).map((p) => sheaf(p.x, p.y, 1.1)).join('')}</g>`);
+        } else {
+          fx.push(`<g clip-path="${clip(i)}">${spotsIn(B.tile[i]!, `${sc.seed}/coins/${i}`, 1, 40, avoid, 40).map((p) => coins(p.x, p.y, 1.1)).join('')}</g>`);
+        }
+        if (sup[i]) addIcon(i, e.kind === 'harvest' || eff.glory > 1 ? 'harvest' : 'tribute', now);
+      }
+    }
+  }
+  if (mil) out.push('<rect x="-5000" y="-5000" width="10000" height="10000" class="lensdim"/>');
+  if (hlTribe !== null) {
+    // the highlighted tribe's lands glow; every other town tile dims
+    for (const t of sc.towns) {
+      if (t.id === sc.castra || !B.tile[t.id]) continue;
+      out.push(t.tribe === hlTribe ? `<path d="${polyD(B.tile[t.id]!)}" class="hlown"/>` : `<path d="${polyD(B.tile[t.id]!)}" class="hlother"/>`);
+    }
+  }
+  out.push(`<g class="fx">${fx.join('')}</g>`);
+
+  // ---- legion reach: march targets (moving) or zones (military lens)
+  const reachAll = legionReach(sup);
+  const moveSet = moving !== null ? reachAll[moving]! : null;
+  if (moveSet) {
+    for (const t of moveSet) out.push(`<circle cx="${n1(P[t]!.x)}" cy="${n1(P[t]!.y + 4)}" r="${n1(34 * u)}" class="dest" style="stroke:${LEGION_COL[moving! % LEGION_COL.length]}"/>`);
+  } else if (mil) {
+    reachAll.forEach((set, i) => { for (const t of set) out.push(`<circle cx="${n1(P[t]!.x)}" cy="${n1(P[t]!.y + 4)}" r="${n1((30 - i * 5) * u)}" class="zone" style="stroke:${LEGION_COL[i % LEGION_COL.length]}"/>`); });
+  }
+
+  // ---- roads
+  const roads: string[] = [], stones: string[] = [];
+  for (const r of sc.roads) {
+    const A = P[r.a]!, Bp = P[r.b]!, d = `M${n1(A.x)},${n1(A.y)} L${n1(Bp.x)},${n1(Bp.y)}`, m = { x: (A.x + Bp.x) / 2, y: (A.y + Bp.y) / 2 };
+    const built = s.built[r.id];
+    const buildable = !built && !checkAction(sc, s, { type: 'road', road: r.id });
+    const shielded = built && (prot[r.a] || prot[r.b]);
+    const cls = built ? (threatened.has(r.id) ? 'road built threat' : shielded && mil ? 'road built shielded' : 'road built')
+      : s.rubble[r.id] ? 'road rubble' : buildable ? 'road open' : 'road closed';
+    let g = `<path d="${d}" class="hit"/>`;
+    if (built) {
+      g += `<path d="${d}" class="glow"/><path d="${d}" class="pave0"/><path d="${d}" class="pave1"/><path d="${d}" class="pave2"/>`;
+    } else if (s.rubble[r.id]) {
+      g += `<path d="${d}" class="ruin"/>`;
+      const rng = new Rng(`${sc.seed}/rubble/${r.id}`), l = Math.hypot(Bp.x - A.x, Bp.y - A.y), ux = (Bp.x - A.x) / l, uy = (Bp.y - A.y) / l;
+      for (let k = 18; k < l - 18; k += 8) {
+        const x = A.x + ux * k + (rng.next() - 0.5) * 12, y = A.y + uy * k + (rng.next() - 0.5) * 12;
+        g += `<rect x="${n1(x - 2.5)}" y="${n1(y - 2)}" width="5" height="4" class="block" transform="rotate(${n1(rng.next() * 90)} ${n1(x)} ${n1(y)})"/>`;
+      }
+      stones.push(`<g class="ruinbadge" transform="translate(${n1(m.x)},${n1(m.y)}) scale(${u.toFixed(3)})"><rect x="-17" y="-10" width="34" height="20" rx="10"/><path d="M-10,-5 l5,5 m0,-5 l-5,5"/><text x="5" y="4.5">${s.rubble[r.id]}</text></g>`);
+    } else {
+      g += `<path d="${d}" class="track0"/><path d="${d}" class="track1"/>`;
+      const toll = roadToll(sc, s, r.id) > 0;
+      const poor = roadCost(sc, s, r.id) > s.denarii;
+      stones.push(`<g class="mile${toll ? ' toll' : ''}${buildable ? '' : ' closed'}${poor ? ' poor' : ''}${mil ? ' faded' : ''}" transform="translate(${n1(m.x)},${n1(m.y)}) scale(${u.toFixed(3)})"><path d="M-8,10 L-8,-4 Q-8,-11 0,-11 Q8,-11 8,-4 L8,10 Z"/><text y="4.5">${roadCost(sc, s, r.id)}</text></g>`);
+    }
+    roads.push(`<g class="${cls}${mil && !built ? ' faded' : ''}" data-road="${r.id}">${g}</g>`);
+  }
+  out.push(roads.join(''));
+  if (cmpRival) out.push(rivalLayer(P));
+  const tg = tutTarget();
+  if (tg?.road !== undefined) {
+    const r = sc.roads[tg.road]!, A = P[r.a]!, Bp = P[r.b]!;
+    out.push(`<path d="M${n1(A.x)},${n1(A.y)} L${n1(Bp.x)},${n1(Bp.y)}" class="tutglow"/>`);
+  }
+  if (tg?.town !== undefined) out.push(`<circle cx="${n1(P[tg.town]!.x)}" cy="${n1(P[tg.town]!.y + 4)}" r="${n1(40 * u)}" class="tutring"/>`);
+
+  // ---- towns
+  const towns: string[] = [], labels: string[] = [];
+  for (const t of v.towns) {
+    const { x, y } = P[t.id]!, isC = t.id === sc.castra;
+    const lab0 = labels.length;
+    const here = s.legions.map((p, i) => (p === t.id ? i : -1)).filter((i) => i >= 0);
+    const dim = moveSet && !moveSet.has(t.id) && !here.includes(moving!);
+    let g = `<circle cx="${n1(x)}" cy="${n1(y + 4)}" r="30" class="thit"/>`;
+    if (isC) {
+      g += `<g transform="translate(${n1(x)},${n1(y)})">${castraIcon()}</g>`;
+      labels.push(`<text x="${n1(x)}" y="${n1(y - 30)}" class="tname">Castra</text>`);
+    } else {
+      const tv = townValue(s, t), z = settlementSize(tv), besieged = (s.siege[t.id] ?? 0) > 0;
+      if (mil && prot[t.id]) g += `<ellipse cx="${n1(x)}" cy="${n1(y + 6)}" rx="${z.top + 6}" ry="${z.bottom + 6}" class="halo"/>`;
+      if (s.garrison[t.id]) g += `<ellipse cx="${n1(x)}" cy="${n1(y + 6)}" rx="${z.top + 10}" ry="${z.bottom + 9}" class="garrison"/>`;
+      if (sel === t.id) g += `<ellipse cx="${n1(x)}" cy="${n1(y + 6)}" rx="${z.top + 4}" ry="${z.bottom + 5}" class="selring"/>`;
+      g += `<g transform="translate(${n1(x)},${n1(y)})">${settlement(tv, sup[t.id]! || besieged, TRIBE_ART[t.tribe % TRIBE_ART.length]!)}</g>`;
+      if (besieged) g += `<path d="M${n1(x - 6)},${n1(y - 4)} c-8,-9 6,-14 -1,-24 c-7,-9 6,-13 0,-22" class="smoke"/>${flame(x - 8, y - 2, 0.9)}${flame(x + 9, y + 2, 0.8)}<g class="siegebadge" transform="translate(${n1(x + z.top - 2)},${n1(y - 14)})"><circle r="10"/><text y="4.4">${s.siege[t.id]}</text></g>`;
+      else if (stranded.has(t.id)) g += `<g class="warnbadge" transform="translate(${n1(x + z.top - 2)},${n1(y - 14)})"><circle r="10"/><text y="4.6">!</text></g>`;
+      const boom = ev.some((e) => e.effect.type === 'boom' && e.town === t.id);
+      // stars (glory per turn) and coins (denarii per turn), side by side, centred; ghosts = coming from an event
+      const inc = townIncome(sc, tv), incNext = boom ? townIncome(sc, tv + 1) : inc;
+      const nStars = tv + (boom ? 1 : 0), nCoins = Math.max(inc, incNext), SW = 12.4, CW = 12, gap = nCoins ? 6 : 0;
+      const total = nStars * SW + gap + nCoins * CW, x0 = x - total / 2, sy = y + z.bottom + 16;
+      const starTip = `${t.name}: ${tv}★, pays ${townGlory(sc, t, tv)} glory a turn once linked${tv > t.value ? ` (+${tv - t.value}★ from silver)` : ''}${boom ? '; a coming event adds 1★' : ''}`;
+      const coinTip = `${t.name} pays ${inc} denarii a turn once linked (towns of 3★ and more pay ★ − 2)${incNext > inc ? `; after the coming event, ${incNext}` : ''}`;
+      const coinsSvg = Array.from({ length: nCoins }, (_, k) => {
+        const cx = x0 + nStars * SW + gap + k * CW + CW / 2;
+        return `<g class="tcoin${k >= inc ? ' ghost' : ''}"><circle cx="${n1(cx)}" cy="${n1(sy - 4.6)}" r="5.2"/><text x="${n1(cx)}" y="${n1(sy - 2.3)}">D</text></g>`;
+      }).join('');
+      const sh = shores(sc), nameW = t.name.length * 14 * 0.62;
+      const badges = [sh.coast[t.id] && 'port', sh.frontier[t.id] && 'frontier'].filter(Boolean) as Array<'port' | 'frontier'>;
+      const badgeSvg = badges.map((b, k) => `<g class="tipme shorebadge" data-tip="${attr(b === 'port' ? `${t.name} is a port (its land meets the sea): pirates can strike its roads, and some decrees reward ports.` : `${t.name} is on the frontier (by the mountains at the edge of the map): Germanic warbands can strike its roads, and some decrees reward frontier forts.`)}">${(b === 'port' ? MINI.anchor : MINI.tower)!(x - nameW / 2 - 11 - k * 20, y - z.top - 9)}</g>`).join('');
+      labels.push(`<text x="${n1(x)}" y="${n1(y - z.top - 4)}" class="tname">${t.name}</text>` +
+        badgeSvg +
+        `<g class="tipme" data-tip="${attr(starTip)}"><text x="${n1(x0)}" y="${n1(sy)}" class="tstars" style="text-anchor:start">${'★'.repeat(t.value)}${tv > t.value ? `<tspan class="boom">${'★'.repeat(tv - t.value)}</tspan>` : ''}${boom ? '<tspan class="ghost">★</tspan>' : ''}</text></g>` +
+        (nCoins ? `<g class="tipme" data-tip="${attr(coinTip)}">${coinsSvg}</g>` : ''));
+      const ic = icons.get(t.id);
+      if (ic?.length) {
+        const w = ic.length * 22, yy = y + z.bottom + 33;
+        let row = `<rect x="${n1(x - w / 2 - 3)}" y="${n1(yy - 11)}" width="${w + 6}" height="22" rx="11" class="pill"/>`;
+        ic.forEach((it, k) => { const cx = x - w / 2 + 11 + k * 22; row += `<g class="tipme" data-tip="${attr(iconTip(it.kind, it.now))}"><circle cx="${n1(cx)}" cy="${n1(yy)}" r="10" class="${it.now ? 'evnow' : 'evnext'} ${ICON_TONE[it.kind] ?? 't'}"/>${MINI[it.kind]!(cx, yy)}</g>`; });
+        labels.push(`<g class="evrow">${row}</g>`);
+      }
+    }
+    if (labels.length > lab0) labels.splice(lab0, labels.length - lab0, about(x, y, labels.slice(lab0).join('')));
+    // standards: one per legion here, to the right of the settlement
+    const sz = isC ? 30 : settlementSize(townValue(s, t)).top;
+    const flags = here.map((i, k) => {
+      const fx2 = x + sz * 0.8 + 4 + k * 17, fy = y + 6;
+      return `<g class="standard ${s.moved[i] ? 'done' : ''} ${moving === i ? 'active' : ''} ${tutTarget()?.legion === i ? 'tutpulse' : ''}" data-leg="${i}">` +
+        (tutTarget()?.legion === i ? `<circle cx="${n1(fx2 + 4)}" cy="${n1(fy - 14)}" r="26" class="tutring"/>` : '') +
+        `<rect class="leghit" x="${n1(fx2 - 11)}" y="${n1(fy - 36)}" width="30" height="46"/><line x1="${n1(fx2)}" y1="${n1(fy + 8)}" x2="${n1(fx2)}" y2="${n1(fy - 28)}"/>` +
+        `<circle cx="${n1(fx2)}" cy="${n1(fy - 30)}" r="3.4" class="eagle"/>` +
+        `<path d="M${n1(fx2)},${n1(fy - 24)} h15 v12 l-7.5,-3 l-7.5,3 z" style="fill:${LEGION_COL[i % LEGION_COL.length]}"/>` +
+        `<text x="${n1(fx2 + 7.5)}" y="${n1(fy - 15)}">${ROMAN[i] ?? i + 1}</text></g>`;
+    }).join('');
+    towns.push(`<g class="town ${sup[t.id] ? 'sup' : 'unsup'} ${sel === t.id ? 'sel' : ''} ${dim ? 'dim' : ''}" data-town="${t.id}">${about(x, y, g + flags)}</g>`);
+  }
+  out.push(stones.join(''), towns.join(''), `<g class="labels">${labels.join('')}</g>`);
+  const vb = vbStr(camBox(frame(v)));
+  return `<svg viewBox="${vb}" preserveAspectRatio="xMidYMid meet" id="map" class="${mil ? 'mil' : ''} ${moveSet ? 'moving' : ''}" style="--u:${u.toFixed(3)}">` +
+    `<defs>${defs.join('')}<pattern id="rainHatch" width="12" height="12" patternUnits="userSpaceOnUse" patternTransform="rotate(25)"><line x1="0" y1="0" x2="0" y2="7" stroke="#2f6f9f" stroke-width="1.6" opacity=".75"/><line x1="6" y1="5" x2="6" y2="10" stroke="#bfe0f5" stroke-width="1.2" opacity=".9"/></pattern><pattern id="snowHatch" width="14" height="14" patternUnits="userSpaceOnUse"><circle cx="3" cy="4" r="1.6" fill="#fff" opacity=".85"/><circle cx="10" cy="10" r="1.2" fill="#fff" opacity=".8"/><circle cx="11" cy="2" r=".9" fill="#fff" opacity=".7"/></pattern><pattern id="dryHatch" width="16" height="16" patternUnits="userSpaceOnUse" patternTransform="rotate(-20)"><path d="M0,8 l4,-2 3,3 4,-2" stroke="#7a5a2a" stroke-width="1.2" fill="none" opacity=".55"/></pattern></defs>` +
+    `<g transform="scale(${1 / K})">${out.join('')}</g></svg>`;
+}
+
+/** Roads one cut event would destroy if it struck the network as it stands now. */
+function wouldCut(e: GameEvent): number {
+  if (e.effect.type !== 'cut') return 0;
+  const p = e.effect.pierce === 'all' ? new Array<boolean>(sc.towns.length).fill(false) : protectedTowns(sc, s, e.effect.pierce === 'garrison');
+  return roadsCutBy(sc, s, e.tribe, e.effect.mode, p, e.effect.where).length;
+}
+
+/**
+ * The forecast as one strip of the day's ten turns. Played and unforeseen turns are narrow numbers;
+ * the foreseen turns (this one and the next, or more under a decree) hold one icon per event, ringed
+ * in its tribe's colour, with ⚠N when it would cut N of your roads now. Tap or hover an icon for the
+ * full text. Effects in force sit on the current turn. Open gambit offers get one line below.
+ */
+function forecast(): string {
+  const ev = visibleEvents(sc, s.turn, s);
+  const T = sc.rules.turns, horizon = s.turn + sc.rules.eventLookahead - 1;
+  const left = (until: number) => { const n = until - s.turn + 1; return `${n} turn${n > 1 ? 's' : ''} left`; };
+  const tribeCol = (t: number) => TRIBE_ART[t % TRIBE_ART.length]!;
+  const chip = (icon: string, tip: string, tone: string, tribe: number | null, badge = '', extra = '') =>
+    `<button type="button" class="chip ${tone}${extra}" data-tip="${attr(tip)}"${tribe !== null ? ` data-hl="${tribe}" style="--tc:${tribeCol(tribe)}"` : ''}>${icon}${tribe !== null ? `<i>${sc.tribes[tribe] ? TRIBE_SYM[tribe % TRIBE_SYM.length] : ''}</i>` : ''}${badge}</button>`;
+  const plain = (h: string) => h.replace(/<[^>]+>/g, '');
+  const offers = gambitOffers(sc, s);
+  const evChip = (e: GameEvent) => {
+    const when = e.turn === s.turn ? 'at the end of this turn' : e.turn === s.turn + 1 ? 'at the end of next turn' : `at the end of turn ${e.turn}`;
+    const tribe = sc.tribes[e.tribe]!;
+    if (e.from !== undefined) {
+      const g = eventSpec(sc.events[e.from]!.kind);
+      const n = wouldCut(e);
+      return chip(EV_EMOJI[e.kind] ?? '⚖️', `${g?.title ?? 'Gambit'} (accepted), ${tribe.name}, ${when}: ${e.note}.${isThreat(e) ? (n ? ` As things stand: ${n} road${n > 1 ? 's' : ''} cut.` : ' Your roads are safe.') : ''}`, isThreat(e) ? 'threat' : 'gambit', e.tribe, isThreat(e) ? (n ? `<b class="bad">${n}</b>` : '<b class="ok">✓</b>') : '');
+    }
+    const spec = eventSpec(e.kind), tone = e.effect.type === 'gambit' ? 'gambit' : spec?.tone ?? 'threat';
+    const text = spec ? plain(spec.text({ who: tribe.name, town: e.town !== undefined ? sc.towns[e.town]!.name : '', when })) : e.kind;
+    if (e.effect.type === 'gambit') {
+      const i = sc.events.indexOf(e), st = (s.accepted ?? []).includes(i) ? ' (accepted)' : declined.has(i) ? ' (declined)' : offers.includes(i) ? ' Accept or decline it below.' : '';
+      return chip(EV_EMOJI[e.kind] ?? '⚖️', `${spec?.title ?? 'Gambit'}: ${text}${st}`, 'gambit', e.tribe, '', (s.accepted ?? []).includes(i) ? ' taken' : '');
+    }
+    const n = wouldCut(e);
+    const risk = isThreat(e) ? (n ? ` As things stand: ${n} road${n > 1 ? 's' : ''} cut.` : ' Your roads are safe.') : '';
+    const named = spec && text.toLowerCase().startsWith(spec.title.toLowerCase()) ? text : `${spec?.title ?? e.kind}: ${text}`;
+    return chip(EV_EMOJI[e.kind] ?? '•', `${named}${risk}`, tone, e.kind === 'idus' ? null : e.tribe, isThreat(e) ? (n ? `<b class="bad">${n}</b>` : '<b class="ok">✓</b>') : '');
+  };
+  const inForce = [
+    ...(s.tolls ?? []).filter((x) => s.turn <= x.until).map((x) => {
+      const which = x.terrain ? `${(x.terrain as string[]).join(' and ')} roads` : 'roads';
+      return x.surcharge < 0
+        ? chip('🫒', `In force: ${which} touching ${sc.tribes[x.tribe]!.name} towns cost ${x.surcharge} (${left(x.until)}).`, 'boon now', x.tribe)
+        : chip(x.terrain ? '❄️' : '🌧️', `In force: ${which} touching ${sc.tribes[x.tribe]!.name} towns cost +${x.surcharge} (${left(x.until)}).`, 'hardship now', x.tribe);
+    }),
+    ...(s.levies ?? []).filter((x) => s.turn <= x.until).map((x) => chip('🏺', `In force: legions and garrisons cost +${x.surcharge} (${left(x.until)}).`, 'hardship now', null)),
+  ];
+  // played turns and unforeseen turns collapse into one small cell each ("1–2", "5–10")
+  const span = (a: number, b: number) => (a === b ? `${a}` : `${a}–${b}`);
+  const cells = [
+    s.turn > 1 ? `<div class="cell past" title="Turns played">${span(1, Math.min(T, s.turn - 1))}</div>` : '',
+    ...Array.from({ length: Math.max(0, Math.min(T, horizon) - s.turn + 1) }, (_, k) => {
+      const t = s.turn + k;
+      const chips = [...(t === s.turn ? inForce : []), ...ev.filter((e) => e.turn === t).map(evChip)];
+      return `<div class="cell ${t === s.turn ? 'cur' : 'seen'}"><span class="tn">${t === s.turn ? `Turn ${t}` : t === s.turn + 1 ? 'Next' : `Turn ${t}`}</span><span class="chips">${chips.join('') || '<span class="quiet">quiet</span>'}</span></div>`;
+    }),
+    horizon < T ? `<div class="cell fog" title="Not yet foreseen: the forecast sees ${sc.rules.eventLookahead} turns ahead">${span(horizon + 1, T)}</div>` : '',
+  ].join('');
+  const offerRows = ev.filter((e) => e.effect.type === 'gambit').map((e) => gambitLine(e, e.turn === s.turn ? 'at the end of this turn' : 'at the end of next turn', offers)).join('');
+  return `<div class="strip" aria-label="Forecast">${cells}</div>${offerRows}`;
+}
+
+/** A price in denarii: green when affordable now, red when not. */
+const costTag = (n: number) => `<span class="price ${s.denarii >= n ? 'ok' : 'no'}">${n} ${n === 1 ? 'denarius' : 'denarii'}</span>`;
+
+function townPanel(): string {
+  if (sel === null) return '';
+  const t = sc.towns[sel]!, sup = supplied(sc, s);
+  const tribe = t.tribe >= 0 ? tribeTag(t.tribe, ' tribe') : tribeTag(-1);
+  const btns: string[] = [];
+  s.legions.forEach((p, i) => {
+    if (p === t.id) return;
+    const ok = !checkAction(sc, s, { type: 'camp', legion: i, town: t.id });
+    if (ok) btns.push(`<button data-camp="${i}" class="legbtn" style="--leg:${LEGION_COL[i % LEGION_COL.length]}"><span class="legtag">${ROMAN[i] ?? i + 1}</span>March from ${sc.towns[p]!.name}</button>`);
+  });
+  if (t.id !== sc.castra && !s.garrison[t.id])
+    btns.push(`<button data-garrison ${checkAction(sc, s, { type: 'garrison', town: t.id }) ? 'disabled' : ''}>Build garrison ${costTag(garrisonCost(sc, s))}</button>`);
+  const here = s.legions.filter((p) => p === t.id).length;
+  return `<div class="panel"><b>${t.name}</b> ${tribe} <span class="muted">${t.value ? ` · ${'★'.repeat(townValue(s, t))} glory${townIncome(sc, townValue(s, t)) ? ` + ${townIncome(sc, townValue(s, t))} denarii` : ''}/turn` : ''} · ${sup[t.id] ? 'supplied' : 'not connected'}</span>
+    ${here && t.id !== sc.castra ? `<div class="muted">${here} legion(s) camped: roads touching this town are shielded.</div>` : ''}
+    ${s.garrison[t.id] ? '<div class="muted">Garrisoned: roads touching this town and its neighbours are shielded.</div>' : ''}
+    <div class="btns">${btns.join('') || `<span class="muted">No orders available here${s.legions.some((p) => p !== t.id) ? ` (legions march at most ${sc.rules.legionRange} roads per turn, once)` : ''}.</span>`}</div></div>`;
+}
+
+// ---- results chart: score after each turn, you vs Caesar vs rivals
+const SERIES_COL = ['#2a78d6', '#eb6834', '#1baf7a', '#eda100', '#e87ba4']; // fixed order: you, Caesar, rivals 1-3 (validated)
+type Line = { name: string; curve: number[]; col: string; you?: boolean; dash?: boolean };
+let chartLines: Line[] = [];
+function chartLinesFor(fin: State, myCurve?: number[]): Line[] {
+  const lines: Line[] = [{ name: 'You', curve: myCurve ?? scoreCurve(sc, fin), col: SERIES_COL[0]!, you: true }];
+  // your best practice run, when it beats the run shown as yours
+  const pb = day?.practice?.best;
+  if (pb && pb.curve.length === lines[0]!.curve.length && pb.total > lines[0]!.curve.at(-1)!) lines.push({ name: 'Your best', curve: pb.curve, col: SERIES_COL[0]!, dash: true });
+  const caesar = dailyScenario(dateLabel, sc.decree.faction).parCurve;
+  if (caesar) lines.push({ name: 'Caesar', curve: caesar, col: SERIES_COL[1]! });
+  const me = day?.username?.toLowerCase();
+  (day?.rivals ?? []).filter((r) => r.curve && r.username.toLowerCase() !== me).sort((a, b) => (b.score ?? 0) - (a.score ?? 0)).slice(0, 3)
+    .forEach((r, k) => lines.push({ name: esc(r.username), curve: r.curve!, col: SERIES_COL[2 + k]! }));
+  return lines;
+}
+function chartSection(fin: State, myCurve?: number[]): string {
+  const lines = (chartLines = chartLinesFor(fin, myCurve));
+  const T = sc.rules.turns, W = 480, H = 250, L = 34, R = 96, Tp = 12, B = 28;
+  const max = Math.max(10, ...lines.flatMap((l) => l.curve));
+  const step = max > 300 ? 100 : max > 120 ? 50 : 20, top = Math.ceil(max / step) * step;
+  const X = (i: number) => L + (i * (W - L - R)) / (T + 1); // 0 = start, 1..T = turns, T+1 = dusk
+  const Y = (v: number) => Tp + (H - Tp - B) * (1 - v / top);
+  const pts = (c: number[]) => [0, ...c].map((v, i) => `${X(i).toFixed(1)},${Y(v).toFixed(1)}`).join(' ');
+  let g = '';
+  for (let v = 0; v <= top; v += step) g += `<line x1="${L}" x2="${W - R}" y1="${Y(v)}" y2="${Y(v)}" class="grid"/><text x="${L - 6}" y="${Y(v) + 4}" class="ytick">${v}</text>`;
+  for (let i = 1; i <= T + 1; i++) g += `<text x="${X(i)}" y="${H - B + 16}" class="xtick">${i <= T ? i : 'Dusk'}</text>`;
+  // losses on your line: turns where roads were cut, towns burned or legions lost
+  const losses = fin.history.map((h, k) => ({ k, cut: h.cut.length, burned: h.burned.length, lost: h.lostLegions.length })).filter((x) => x.cut || x.burned || x.lost);
+  for (const ln of [...lines].reverse()) g += `<polyline points="${pts(ln.curve)}" class="ln${ln.you ? ' you' : ''}${ln.dash ? ' dash' : ''}" style="stroke:${ln.col}"/>`;
+  const you = lines[0]!;
+  for (const x of losses) g += `<g class="loss"><circle cx="${X(x.k + 1)}" cy="${Y(you.curve[x.k]!)}" r="5.5" style="stroke:${you.col}"/><path d="M${X(x.k + 1) - 2.5},${Y(you.curve[x.k]!) - 2.5} l5,5 m0,-5 l-5,5"/></g>`;
+  // direct labels at the end, spread so they never overlap
+  const ends = lines.map((l) => ({ l, y: Y(l.curve.at(-1)!) })).sort((a, b) => a.y - b.y);
+  for (let k = 1; k < ends.length; k++) ends[k]!.y = Math.max(ends[k]!.y, ends[k - 1]!.y + 14);
+  for (const e of ends) {
+    const ey = Y(e.l.curve.at(-1)!);
+    g += `<line x1="${X(T + 1) + 4}" y1="${ey}" x2="${X(T + 1) + 12}" y2="${e.y}" class="leader"/><circle cx="${X(T + 1) + 17}" cy="${e.y}" r="3.5" style="fill:${e.l.col}"/><text x="${X(T + 1) + 24}" y="${e.y + 4}" class="endlab">${e.l.name} ${e.l.curve.at(-1)}</text>`;
+  }
+  g += `<line class="cross" x1="0" x2="0" y1="${Tp}" y2="${H - B}" style="display:none"/><rect class="hover" x="${L}" y="${Tp}" width="${W - L - R}" height="${H - Tp - B}"/>`;
+  // insight: where Caesar pulled away, and where you bled
+  let insight = '';
+  const c = lines.find((l) => l.name === 'Caesar');
+  if (c) {
+    const gain = (cv: number[], i: number) => cv[i]! - (i ? cv[i - 1]! : 0);
+    let worst = -1, wd = 0, best = -1, bd = 0;
+    for (let i = 0; i < T; i++) { const d = gain(c.curve, i) - gain(you.curve, i); if (d > wd) { wd = d; worst = i; } if (-d > bd) { bd = -d; best = i; } }
+    const parts: string[] = [];
+    if (worst >= 0) parts.push(`Caesar pulled furthest ahead on <b>turn ${worst + 1}</b> (+${gain(c.curve, worst)} vs your +${gain(you.curve, worst)}).`);
+    if (best >= 0) parts.push(`Your best turn against him: <b>turn ${best + 1}</b> (+${gain(you.curve, best)} vs +${gain(c.curve, best)}).`);
+    const dusk = (cv: number[]) => cv.at(-1)! - cv[T - 1]!;
+    if (dusk(c.curve) !== dusk(you.curve)) parts.push(`At dusk the decree and losses gave you ${dusk(you.curve) >= 0 ? '+' : ''}${dusk(you.curve)}, Caesar ${dusk(c.curve) >= 0 ? '+' : ''}${dusk(c.curve)}.`);
+    insight = parts.join(' ');
+  }
+  if (losses.length) insight += ` ${losses.map((x) => `Turn ${x.k + 1}: ${[x.cut ? `${x.cut} road(s) cut` : '', x.burned ? `${x.burned} town(s) burned` : '', x.lost ? `${x.lost} legion(s) lost` : ''].filter(Boolean).join(', ')}`).join('. ')}.`;
+  const legend = lines.map((l) => `<span class="lg"><i class="${l.dash ? 'dash' : ''}" style="${l.dash ? `border-color:${l.col}` : `background:${l.col}`}"></i>${l.name}</span>`).join('') + (losses.length ? '<span class="lg"><i class="lossk">✕</i>losses</span>' : '');
+  const rows = Array.from({ length: T + 1 }, (_, i) => `<tr><td>${i < T ? i + 1 : 'Dusk'}</td>${lines.map((l) => `<td>${l.curve[i]} <span class="muted">(${(l.curve[i]! - (i ? l.curve[i - 1]! : 0)) >= 0 ? '+' : ''}${l.curve[i]! - (i ? l.curve[i - 1]! : 0)})</span></td>`).join('')}<td class="muted">${i < T ? [fin.history[i]?.cut.length ? `${fin.history[i]!.cut.length} cut` : '', fin.history[i]?.burned.length ? `${fin.history[i]!.burned.length} burned` : ''].filter(Boolean).join(', ') : ''}</td></tr>`).join('');
+  return `<section class="rcard chart"><h3>Turn by turn</h3>
+    <div class="lgrow2">${legend}</div>
+    <div class="chartbox"><svg viewBox="0 0 ${W} ${H}" class="scorechart" role="img" aria-label="Score after each turn: ${lines.map((l) => `${l.name} ${l.curve.at(-1)}`).join(', ')}">${g}</svg><div class="tip" style="display:none"></div></div>
+    ${insight ? `<p class="insight">${insight}</p>` : ''}
+    <details><summary>Show as a table</summary><table class="ctab"><tr><th>Turn</th>${lines.map((l) => `<th>${l.name}</th>`).join('')}<th>Your losses</th></tr>${rows}</table></details>
+    ${!c ? '<div class="muted small">Caesar\'s turn-by-turn record is not available for this day.</div>' : ''}
+  </section>`;
+}
+function wireChart() {
+  const svgEl = root.querySelector<SVGSVGElement>('.scorechart'), tip = root.querySelector<HTMLElement>('.chartbox .tip');
+  const hover = svgEl?.querySelector<SVGRectElement>('.hover'), cross = svgEl?.querySelector<SVGLineElement>('.cross');
+  if (!svgEl || !tip || !hover || !cross) return;
+  const T = sc.rules.turns, W = 480, L = 34, R = 96;
+  const show = (clientX: number) => {
+    const box = svgEl.getBoundingClientRect(), x = ((clientX - box.left) / box.width) * W;
+    const i = Math.max(1, Math.min(T + 1, Math.round(((x - L) * (T + 1)) / (W - L - R))));
+    const cx = L + (i * (W - L - R)) / (T + 1);
+    cross.setAttribute('x1', String(cx)); cross.setAttribute('x2', String(cx)); cross.style.display = '';
+    tip.innerHTML = `<b>${i <= T ? `Turn ${i}` : 'Dusk'}</b>` + chartLines.map((l) => {
+      const v = l.curve[i - 1]!, d = v - (i > 1 ? l.curve[i - 2]! : 0);
+      return `<div><i style="background:${l.col}"></i>${l.name} <b>${v}</b> <span class="muted">${d >= 0 ? '+' : ''}${d}</span></div>`;
+    }).join('');
+    tip.style.display = '';
+    const left = (cx / W) * box.width;
+    tip.style.left = `${Math.min(box.width - 150, Math.max(0, left + 10))}px`;
+  };
+  hover.addEventListener('pointermove', (e) => show(e.clientX));
+  hover.addEventListener('pointerdown', (e) => show(e.clientX));
+  hover.addEventListener('pointerleave', () => { tip.style.display = 'none'; cross.style.display = 'none'; });
+}
+
+const shortDate = (d: string) => new Date(`${d}T00:00:00Z`).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', timeZone: 'UTC' });
+// ---- past campaigns: the last 7 days, and your record against Caesar and rivals
+let history: HistoryDay[] | null = null;
+let historyState: 'idle' | 'loading' | 'done' | 'error' = 'idle';
+async function loadHistory() {
+  if (!social || historyState !== 'idle') return;
+  historyState = 'loading';
+  try { history = await social.history(); historyState = 'done'; } catch { historyState = 'error'; }
+  if (view === 'results') render();
+}
+function recordChart(days: HistoryDay[]): string {
+  const asc = days.slice().reverse().filter((d) => d.par);
+  if (asc.length < 2) return '';
+  const pct = (v: number, d: HistoryDay) => Math.round((100 * v) / d.par!);
+  const me = asc.map((d) => (d.me ? pct(d.me.total, d) : null));
+  const names = new Map<string, number>();
+  for (const d of asc) for (const r of d.rivals) names.set(r.username, (names.get(r.username) ?? 0) + 1);
+  const top = [...names.entries()].sort((a, b) => b[1] - a[1]).slice(0, 3).map(([n]) => n);
+  const lines = [{ name: 'You', col: SERIES_COL[0]!, v: me, you: true },
+    ...top.map((n, k) => ({ name: esc(n), col: SERIES_COL[2 + k]!, v: asc.map((d) => { const r = d.rivals.find((x) => x.username === n); return r ? pct(r.score, d) : null; }), you: false }))];
+  const W = 420, H = 190, L = 36, R = 52, Tp = 10, B = 26;
+  const all = lines.flatMap((l) => l.v.filter((x): x is number => x !== null));
+  const top100 = Math.max(110, Math.ceil(Math.max(...all, 100) / 10) * 10);
+  const X = (i: number) => L + (i * (W - L - R)) / Math.max(1, asc.length - 1), Y = (v: number) => Tp + (H - Tp - B) * (1 - v / top100);
+  let g = '';
+  for (const v of [0, 50, 100].filter((x) => x <= top100)) g += `<line x1="${L}" x2="${W - R}" y1="${Y(v)}" y2="${Y(v)}" class="grid"/><text x="${L - 6}" y="${Y(v) + 4}" class="ytick">${v}%</text>`;
+  g += `<line x1="${L}" x2="${W - R}" y1="${Y(100)}" y2="${Y(100)}" class="caesar"/><text x="${W - R + 6}" y="${Y(100) + 4}" class="endlab">Caesar</text>`;
+  asc.forEach((d, i) => { g += `<text x="${X(i)}" y="${H - B + 16}" class="xtick">${d.date.slice(8)}/${d.date.slice(5, 7)}</text>`; });
+  for (const ln of [...lines].reverse()) {
+    let path = '', pen = false;
+    ln.v.forEach((v, i) => { if (v === null) { pen = false; return; } path += `${pen ? 'L' : 'M'}${X(i).toFixed(1)},${Y(v).toFixed(1)} `; pen = true; });
+    g += `<path d="${path}" class="ln${ln.you ? ' you' : ''}" style="stroke:${ln.col}"/>`;
+    ln.v.forEach((v, i) => { if (v !== null) g += `<circle cx="${X(i)}" cy="${Y(v)}" r="${ln.you ? 4 : 3}" style="fill:${ln.col}" class="dot"><title>${ln.name}: ${v}% of Caesar on ${asc[i]!.date}</title></circle>`; });
+  }
+  const legend = lines.map((l) => `<span class="lg"><i style="background:${l.col}"></i>${l.name}</span>`).join('') + '<span class="lg"><i class="cz"></i>Caesar = 100%</span>';
+  return `<div class="lgrow2">${legend}</div><svg viewBox="0 0 ${W} ${H}" class="scorechart" role="img" aria-label="Score as a percentage of Caesar's, day by day">${g}</svg>`;
+}
+function pastSection(): string {
+  if (!social) return '';
+  if (historyState === 'loading' || historyState === 'idle') return '<section class="rcard past"><h3>Past campaigns</h3><div class="muted small">Unrolling the archives…</div></section>';
+  if (historyState === 'error' || !history) return '';
+  const days = history.filter((d) => d.date !== dateLabel || d.me);
+  if (!days.length) return '';
+  const rows = days.map((d) => {
+    const here = d.date === dateLabel;
+    const mine = d.me ? `<b>${d.me.total}</b>${d.me.late ? ' ⏱' : ''}${d.par ? ` <span class="muted">${Math.round((100 * d.me.total) / d.par)}%</span>` : ''}` : '<span class="muted">not played</span>';
+    const rank = d.me?.rank ? `#${d.me.rank}/${d.players}` : d.players ? `<span class="muted">${d.players} played</span>` : '';
+    const btn = here ? '<span class="muted small">this post</span>' : d.postId ? `<button data-open="${d.postId}">${d.me ? 'Open' : 'Play'}</button>` : '';
+    return `<tr${here ? ' class="mine"' : ''}><td>${shortDate(d.date)}</td><td>${mine}</td><td>${rank}</td><td class="muted">${d.par ?? '–'}</td><td>${btn}</td></tr>`;
+  }).join('');
+  const policy = day?.policy === 'practice' ? 'Past days are practice only on this subreddit.'
+    : day?.policy === 'ontime' ? 'Past days are scored but stay off their leaderboard.' : 'Past days are scored with a ⏱ mark. Late plays never extend streaks.';
+  return `<section class="rcard past"><h3>Past campaigns</h3>
+    <table class="lb past"><tr><th>Day</th><th>You</th><th>Rank</th><th>Caesar</th><th></th></tr>${rows}</table>
+    <div class="muted small">${policy}</div>
+    ${recordChart(history) ? `<h3 class="sub">Your record</h3>${recordChart(history)}` : ''}
+  </section>`;
+}
+
+/** Results page: score, rank, leaderboard, tomorrow's vote with explanations, sharing, debug. */
+function renderResults() {
+  const fin = official ?? s;
+  const stored = staleResult && day?.me ? day.me : null;
+  const b = stored ? (() => {
+    const penalty = (stored.lost ?? 0) * sc.rules.lostLegionPenalty, glory = stored.glory ?? stored.total;
+    return { glory, penalty, decree: stored.total - glory + penalty, total: stored.total, decreeMet: stored.decreeMet ?? false };
+  })() : score(sc, fin);
+  const p = day?.par ?? par;
+  const pct = p ? Math.round((100 * b.total) / p) : null;
+  const beat = p !== null && b.total >= p;
+  const practiceLine = practice && isOver(sc, s)
+    ? `<div class="pracline">Practice run: <b>${score(sc, s).total}</b> (not ranked)${practiceNote?.pb && practiceNote.prev !== null ? ' · <span class="pb">New personal best!</span>' : ''}</div>` : '';
+  const lb = day?.leaderboard;
+  const dayWord = day?.late ? `on ${prettyDate(dateLabel)}` : 'today';
+  const rank = lb?.me ? `#${lb.me.rank} of ${lb.players} ${dayWord}${lb.me.late ? ' · played late ⏱' : ''}`
+    : day?.me && day.offBoard ? `Played late: would place #${day.offBoard} of ${lb!.players + 1} (not on the board)`
+      : day?.me ? '' : social ? 'Not on the board yet' : 'Played offline: score not saved';
+  const streak = day?.streak && day.streak.streak > 1 ? ` · 🔥 ${day.streak.streak}-day streak` : '';
+  const rivalSet = new Set((day?.rivals ?? []).map((r) => r.username.toLowerCase()));
+  const rows = (lb?.board ?? []).slice(0, 10).map((r) => {
+    const me = r.username === day!.username, rival = rivalSet.has(r.username.toLowerCase());
+    const btn = me || !day?.username ? '' : `<button class="follow ${rival ? 'on' : ''}" data-follow="${esc(r.username)}" data-on="${rival ? '0' : '1'}" ${busy ? 'disabled' : ''}>${rival ? '✓ rival' : '+ rival'}</button>`;
+    return `<tr class="${me ? 'mine' : rival ? 'rival' : ''}"><td>${r.rank}</td><td>${esc(r.username)} ${btn}</td><td>${r.score}${r.late ? ' <span title="Played after the day" class="latemark">⏱</span>' : ''}</td></tr>`;
+  }).join('');
+  $('app').innerHTML = `
+  <div class="results">
+    <div class="rtop"><b>All Roads Lead to Rome</b> <span class="muted">· ${dateLabel}</span>
+      <span class="icons"><button id="snd" title="${sound ? 'Sound effects on: tap to mute' : 'Sound effects off'}">${sound ? '🔊' : '🔇'}</button><button id="mus" class="${music ? '' : 'off'}" title="${music ? 'Music on: tap to stop' : 'Music off'}">🎵</button><button id="rules" title="How to play">?</button></span></div>
+    <section class="hero">
+      <h2>${beat ? 'You out-marched Caesar!' : 'The Senate has counted your glory'}</h2>
+      <div class="big">${b.total}</div>
+      <div class="vs">${p !== null ? `${pct}% of Caesar's ${p}` : "Caesar's score is not available for this day"}</div>
+      <div class="rank">${rank}${streak}</div>${practiceLine}
+      ${stored ? '<div class="stalenote">This day\'s campaign was changed by a game update after you played it. Your score stands as it was recorded, but your moves can no longer be shown on the map, and Caesar\'s score may have changed.</div>' : ''}
+    </section>
+    ${stored ? (stored.curve ? chartSection(fin, stored.curve) : '') : chartSection(fin)}
+    ${attemptsSection()}
+    <section class="rcard">
+      <table class="brk"><tr><td>Glory from your towns</td><td>${b.glory}</td></tr>
+      <tr><td>Decree: ${sc.decree.title}</td><td>${b.decree ? '+' + b.decree : 'missed'}</td></tr>
+      <tr><td>Legions lost</td><td>${b.penalty ? '−' + b.penalty : '0'}</td></tr>
+      <tr class="tot"><td>Score</td><td>${b.total}</td></tr></table>
+    </section>
+    ${voteSection()}
+    ${rows ? `<section class="rcard"><h3>Today's generals</h3><table class="lb">${rows}</table></section>` : ''}
+    ${rivalsSection()}
+    ${pastSection()}
+    ${shareSection()}
+    <section class="ractions">
+      ${day?.me ? `<button id="join" ${busy || joined ? 'disabled' : ''}>${joined ? 'Joined ✓' : 'Join the legion'}</button>` : ''}
+      ${staleResult ? "" : `<button id="tomap">Back to your map</button>`}
+      <button id="practice">Practice again (unscored)</button>
+    </section>
+    ${socialMsg ? `<div class="muted small center">${esc(socialMsg)}</div>` : ''}
+    ${day?.isMod ? `<section class="rcard debug"><h3>Moderator tools</h3>
+      <button data-reset="me" ${busy ? 'disabled' : ''}>${confirmReset === 'me' ? 'Tap again to wipe your game' : 'Reset my game today'}</button>
+      <button data-reset="day" ${busy ? 'disabled' : ''}>${confirmReset === 'day' ? "Tap again to wipe everyone's" : "Reset today's whole board"}</button>
+      <div class="muted small">Reset mine also clears your streak record and your tutorial status. Visible to subreddit moderators only.</div>
+      ${day.tutorialStats ? `<div class="muted small">Tutorial: ${day.tutorialStats.start ?? 0} started, ${day.tutorialStats.done ?? 0} finished, ${day.tutorialStats.skip ?? 0} skipped${(() => { const sk = Object.entries(day.tutorialStats!).filter(([k]) => k.startsWith('skip@')).sort((a, b) => b[1] - a[1])[0]; return sk ? ` (most often at "${sk[0].slice(5)}")` : ''; })()}.</div>` : ''}</section>` : ''}
+    <div class="ver center">${versionLabel()}</div>
+  </div>
+  ${showRules ? rulesSheet() : ''}`;
+  wireChart();
+  void loadHistory();
+  root.querySelector('#tutreplay')?.addEventListener('click', () => startTutorial());
+  root.querySelectorAll<HTMLButtonElement>('[data-open]').forEach((bt) => (bt.onclick = () => social?.openPost(bt.dataset.open!)));
+  $('snd').onclick = () => { sound = !sound; setSound(sound); if (sound) play('turn'); render(); };
+  $('mus').onclick = () => { music = !music; setMusic(music); render(); };
+  $('rules').onclick = () => { showRules = !showRules; render(); };
+  root.querySelector('#rulesx')?.addEventListener('click', () => { showRules = false; render(); });
+  root.querySelectorAll<HTMLButtonElement>('[data-tab]').forEach((b) => (b.onclick = () => { rulesTab = b.dataset.tab as typeof rulesTab; render(); }));
+  root.querySelector('#tomap')?.addEventListener('click', () => { view = 'map'; render(); });
+  root.querySelector('#practice')?.addEventListener('click', () => startPractice());
+  root.querySelectorAll<HTMLButtonElement>('[data-vote]').forEach((bt) => (bt.onclick = () => void doVote(bt.dataset.vote as Faction)));
+  root.querySelectorAll<HTMLButtonElement>('[data-reset]').forEach((bt) => (bt.onclick = () => void doReset(bt.dataset.reset as 'me' | 'day')));
+  root.querySelector<HTMLButtonElement>('#share')?.addEventListener('click', () => void doShare());
+  root.querySelector<HTMLButtonElement>('#join')?.addEventListener('click', () => void doJoin());
+  root.querySelector<HTMLButtonElement>('#challenge')?.addEventListener('click', () => void doChallenge());
+  root.querySelectorAll<HTMLButtonElement>('[data-compare]').forEach((bt) => (bt.onclick = () => void startCompare(bt.dataset.compare!)));
+  root.querySelectorAll<HTMLButtonElement>('[data-follow]').forEach((bt) =>
+    (bt.onclick = () => void doFollow(bt.dataset.follow!, bt.dataset.on === '1')));
+  root.querySelectorAll<HTMLInputElement>('[data-mention]').forEach((cb) => (cb.onchange = () => {
+    if (cb.checked && mentionSel.size >= MAX_MENTIONS) { cb.checked = false; return; }
+    if (cb.checked) mentionSel.add(cb.dataset.mention!); else mentionSel.delete(cb.dataset.mention!);
+    render();
+  }));
+  const inp = root.querySelector<HTMLInputElement>('#rivalname');
+  if (inp) {
+    inp.oninput = () => { rivalInput = inp.value; };
+    inp.onkeydown = (e) => { if (e.key === 'Enter') void doFollow(inp.value, true); };
+  }
+  root.querySelector<HTMLButtonElement>('#addrival')?.addEventListener('click', () => void doFollow(rivalInput, true));
+}
+
+const MAX_MENTIONS = 3;
+
+/** States after each turn (index 0 = the start) from an action log. */
+function statesByTurn(actions: readonly Action[]): State[] {
+  let st = initialState(sc);
+  const out = [st];
+  for (const a of actions) { if (checkAction(sc, st, a)) break; st = apply(sc, st, a); if (a.type === 'end') out.push(st); }
+  return out;
+}
+
+async function startCompare(name: string) {
+  if (!social?.rivalPlan || busy) return;
+  const mine = log.length ? log : day?.me?.actions ?? [];
+  busy = true; render();
+  try {
+    const theirs = await social.rivalPlan(name);
+    if (!theirs) { socialMsg = `u/${name} has not marched today yet.`; return; }
+    compare = { name, mine: statesByTurn(mine), theirs: statesByTurn(theirs), k: 1 };
+    view = 'map'; cam.z = 1; cam.cx = NaN;
+  } catch (e) { socialMsg = `Could not load u/${name}'s campaign: ${e instanceof Error ? e.message : e}`; } finally { busy = false; render(); }
+}
+
+/** The rival's network over yours: roads only they built (dashed), roads you share (a stripe), their forts and legions. */
+function rivalLayer(P: Pt[]): string {
+  const r = cmpRival!, rs = supplied(sc, r), ms = supplied(sc, s);
+  let g = '';
+  for (const rd of sc.roads) {
+    if (!r.built[rd.id]) continue;
+    const A = P[rd.a]!, B = P[rd.b]!;
+    g += `<path d="M${n1(A.x)},${n1(A.y)} L${n1(B.x)},${n1(B.y)}" class="rivroad ${s.built[rd.id] ? 'both' : 'only'}"/>`;
+  }
+  for (const t of sc.towns) {
+    const p = P[t.id]!;
+    if (t.id !== sc.castra && r.garrison[t.id]) g += `<ellipse cx="${n1(p.x)}" cy="${n1(p.y + 6)}" rx="46" ry="30" class="rivfort"/>`;
+    if (t.id !== sc.castra && rs[t.id] && !ms[t.id]) g += `<circle cx="${n1(p.x)}" cy="${n1(p.y - 4)}" r="9" class="rivheld"/>`;
+  }
+  r.legions.forEach((t, i) => { const p = P[t]!; g += `<g class="rivleg" transform="translate(${n1(p.x - 34 - i * 10)},${n1(p.y - 6)})"><line y1="10" y2="-22"/><path d="M0,-21 h-13 v10 l6.5,-2.5 l6.5,2.5 z"/></g>`; });
+  return `<g class="rival">${g}</g>`;
+}
+
+/** Turn-by-turn comparison with a rival: the map at the chosen turn, both networks, both numbers. */
+function renderCompare() {
+  const c = compare!, T = sc.rules.turns, keep = s;
+  const k = Math.max(0, Math.min(c.k, T));
+  s = c.mine[Math.min(k, c.mine.length - 1)]!;
+  cmpRival = c.theirs[Math.min(k, c.theirs.length - 1)]!;
+  const prevWrap = root.querySelector<HTMLElement>('.mapwrap');
+  if (prevWrap) mapArea = { w: prevWrap.clientWidth, h: prevWrap.clientHeight };
+  boardRotated = chooseOrientation();
+  const stat = (st: State) => ({
+    glory: st.glory, denarii: st.denarii, towns: suppliedTowns(sc, st).length, roads: st.built.filter(Boolean).length,
+    forts: st.garrison.filter(Boolean).length, legions: st.legions.length, cut: st.history.reduce((n, h) => n + h.cut.length, 0),
+    total: k === T ? score(sc, st).total : null,
+  });
+  const a = stat(s), b = stat(cmpRival);
+  const row = (label: string, x: number | null, y: number | null) => (x === null || y === null ? '' : `<tr><td>${label}</td><td class="${x > y ? 'lead' : ''}">${x}</td><td class="${y > x ? 'lead' : ''}">${y}</td></tr>`);
+  const when = k === 0 ? 'Before the first turn' : k === T ? 'Dusk' : `After turn ${k}`;
+  $('app').innerHTML = `
+  <div class="layout">
+    <section class="mapcol"><div class="mapwrap"><div class="bgslot"></div>${svg()}</div></section>
+    <aside class="side"><header><div class="title"><span class="ttl"><b>You vs u/${esc(c.name)}</b> <span class="muted">· ${dateLabel}</span></span></div></header>
+    <div class="sidebody cmp">
+      <div class="cmpturn"><button id="cmpprev" ${k === 0 ? 'disabled' : ''} aria-label="Previous turn">◀</button><b>${when}</b><button id="cmpnext" ${k === T ? 'disabled' : ''} aria-label="Next turn">▶</button></div>
+      <input type="range" id="cmprange" min="0" max="${T}" value="${k}" aria-label="Turn">
+      <table class="cmptbl"><tr><th></th><th>You</th><th>u/${esc(c.name)}</th></tr>
+        ${row('Score', a.total, b.total)}${row('Glory', a.glory, b.glory)}${row('Denarii', a.denarii, b.denarii)}${row('Towns linked', a.towns, b.towns)}${row('Roads', a.roads, b.roads)}${row('Garrisons', a.forts, b.forts)}${row('Legions', a.legions, b.legions)}${row('Roads lost', a.cut, b.cut)}
+      </table>
+      <div class="cmpkey small"><div><span class="k only"></span> a road only they built</div><div><span class="k both"></span> a road you both built</div><div><span class="k fort"></span> their garrison · <span class="k held"></span> a town they hold and you don't · <span class="k leg"></span> their legion</div></div>
+      <p class="muted small">Your own roads, legions and events are drawn as in your game at that turn.</p>
+      <button id="cmpback" class="primary">Back to results</button>
+    </div></aside>
+  </div>`;
+  s = keep; cmpRival = null;
+  attachBoard();
+  wireZoom(root.querySelector<HTMLElement>('.mapwrap')!);
+  const go = (n: number) => { c.k = Math.max(0, Math.min(T, n)); render(); };
+  root.querySelector('#cmpprev')?.addEventListener('click', () => go(c.k - 1));
+  root.querySelector('#cmpnext')?.addEventListener('click', () => go(c.k + 1));
+  root.querySelector<HTMLInputElement>('#cmprange')?.addEventListener('input', (e) => go(Number((e.target as HTMLInputElement).value)));
+  root.querySelector('#cmpback')?.addEventListener('click', () => { compare = null; view = 'results'; render(); });
+}
+
+/** Your rivals' standing today, plus adding/removing rivals. */
+function rivalsSection(): string {
+  if (!social || !day?.username) return '';
+  const rivals = day.rivals ?? [];
+  const mine = official ? score(sc, official).total : day.me?.total ?? null;
+  const all = [...rivals.filter((r) => r.score !== null).map((r) => r.score!), ...(mine !== null ? [mine] : [])].sort((a, b) => b - a);
+  const place = mine !== null && rivals.some((r) => r.score !== null) ? `You place #${all.indexOf(mine) + 1} of ${all.length} among your rivals.` : '';
+  const list = rivals.map((r) => `<tr><td>${esc(r.username)}${r.streak > 1 ? ` <span class="muted">🔥${r.streak}</span>` : ''}</td>
+      <td>${r.score === null ? (r.best != null ? `<span class="muted">practice only · best ${r.best}</span>` : '<span class="muted">has not marched yet</span>') : `<b>${r.score}</b>${r.rank ? ` <span class="muted">#${r.rank}</span>` : ''}`}${r.score !== null && r.best != null && r.best > r.score ? `<div class="muted small" title="Best of ${r.tries ?? 1} tries, practice included">best ${r.best} · ${r.tries ?? 1} tries</div>` : ''}</td>
+      <td>${r.score !== null && (official || day?.me) && !staleResult && social?.rivalPlan ? `<button class="cmpbtn" data-compare="${esc(r.username)}" ${busy ? 'disabled' : ''} title="Replay both campaigns turn by turn on the map">Compare</button>` : ''}<button class="follow on" data-follow="${esc(r.username)}" data-on="0" title="Stop following" ${busy ? 'disabled' : ''}>×</button></td></tr>`).join('');
+  return `<section class="rcard rivals"><h3>Your rivals</h3>
+    ${rivals.length ? `<div class="muted small">${place}</div><table class="lb">${list}</table>` : '<div class="muted small">Follow other generals from the leaderboard, or by name, to compare scores every day.</div>'}
+    <div class="addrow"><input id="rivalname" placeholder="u/username" value="${esc(rivalInput)}" maxlength="23" autocomplete="off"><button id="addrival" ${busy ? 'disabled' : ''}>Follow</button></div>
+  </section>`;
+}
+
+/** Every attempt of the day: the official (ranked) run first, then practice runs, with the personal best. */
+function attemptsSection(): string {
+  const pr = day?.practice;
+  const off = day?.me?.total ?? (official ? score(sc, official).total : null);
+  if (!pr?.count && !practiceNote) return '';
+  const runs = [...(off !== null ? [{ total: off, ranked: true }] : []), ...(pr?.runs ?? []).map((r) => ({ total: r.total, ranked: false }))];
+  // offline, or the save failed: still show the run just played
+  if (practiceNote && !(pr?.runs.length)) runs.push({ total: practiceNote.total, ranked: false });
+  const best = Math.max(...runs.map((r) => r.total)), top = Math.max(1, best, day?.par ?? par ?? 0);
+  const p = day?.par ?? par;
+  const bars = runs.map((r, i) => `<div class="att${r.ranked ? ' ranked' : ''}${r.total === best ? ' best' : ''}" title="${r.ranked ? 'Official run (ranked)' : `Practice ${i + (off !== null ? 0 : 1)}`}: ${r.total}">
+      <i style="height:${Math.max(4, Math.round((60 * Math.max(0, r.total)) / top))}px"></i><span>${r.total}</span></div>`).join('');
+  const parLine = p ? `<div class="attpar" style="bottom:${Math.round((60 * p) / top) + 16}px"><span>Caesar ${p}</span></div>` : '';
+  const hidden = (pr?.count ?? 0) - (pr?.runs.length ?? 0);
+  const gain = off !== null && best > off ? ` (+${best - off} over your ranked run)` : '';
+  return `<section class="rcard attempts"><h3>Your attempts</h3>
+    <div class="attsum"><span>Ranked: <b>${off ?? '–'}</b></span><span>Personal best: <b>${best}</b>${gain}</span><span>${(pr?.count ?? (practiceNote ? 1 : 0)) + (off !== null ? 1 : 0)} tries</span></div>
+    <div class="attbars">${parLine}${bars}</div>
+    <div class="muted small">${hidden > 0 ? `Your first ${hidden} practice runs are counted but not drawn. ` : ''}Only your first finished run is ranked; practice runs are kept for you and your rivals to see.</div>
+  </section>`;
+}
+
+/** Share comment (optionally mentioning up to 3 rivals who have not played) and challenge link. */
+function shareSection(): string {
+  if (!social || !day?.me) return '';
+  const idle = (day.rivals ?? []).filter((r) => r.score === null);
+  const picks = !shared && idle.length ? `<div class="mentions"><div class="muted small">Challenge rivals who haven't marched yet (up to ${MAX_MENTIONS}); Reddit will notify them:</div>
+    ${idle.map((r) => `<label><input type="checkbox" data-mention="${esc(r.username)}" ${mentionSel.has(r.username) ? 'checked' : ''}> u/${esc(r.username)}</label>`).join('')}</div>` : '';
+  return `<section class="rcard share"><h3>Spread the word</h3>${picks}
+    <div class="sharebtns">
+      <button id="share" ${busy || shared ? 'disabled' : ''}>${shared ? 'Shared ✓' : mentionSel.size ? `Share & challenge ${mentionSel.size}` : 'Share result in comments'}</button>
+      <button id="challenge">Copy challenge link</button>
+    </div>
+    <div class="muted small">One result comment per day. The link opens today's map and tells your friend the score to beat.</div>
+  </section>`;
+}
+
+/** Tomorrow's decree for each faction: the vote decides which one becomes law. */
+const FACTION: Record<Faction, { name: string; motto: string }> = {
+  populares: { name: 'Populares', motto: 'glory and ambition' },
+  optimates: { name: 'Optimates', motto: 'order and caution' },
+  augures: { name: 'Augures', motto: 'the will of the gods' },
+};
+const tomorrow = (f: Faction) => dailyScenario(addDays(dateLabel, 1), f).scenario.decree;
+
+const esc = (x: string) => x.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
+
+function voteSection(): string {
+  if (!social || !day?.me) return '';
+  if (day.late) return `<section class="rcard vote2"><h3>The Senate has adjourned</h3><p class="muted">Voting for ${prettyDate(dateLabel)} closed at midnight, when the next day's decree was set.</p></section>`;
+  const on = ballotFor(addDays(dateLabel, 1));
+  const total = on.reduce((n, f) => n + (day!.votes[f] ?? 0), 0);
+  const pctv = (f: Faction) => (total ? Math.round((100 * (day!.votes[f] ?? 0)) / total) : 0);
+  const card = (f: Faction) => {
+    const mine = day!.myVote === f;
+    const bar = day!.myVote ? `<div class="vbar ${f}"><span style="width:${pctv(f)}%"></span><b>${pctv(f)}%</b> of votes${mine ? ' · your choice' : ''}</div>`
+      : `<button data-vote="${f}" class="votebtn ${f}" ${busy ? 'disabled' : ''}>${f === 'augures' ? 'Consult the Books' : `Back the ${FACTION[f].name}`}</button>`;
+    if (f === 'augures') return `<div class="dcard augures sealed ${mine ? 'mine' : ''}">
+      <div class="dfac">${FACTION[f].name} <span class="muted">· ${FACTION[f].motto}</span></div>
+      <div class="dtitle">📜 Consult the Sibylline Books</div>
+      <div class="drule">A sealed scroll. The Augurs' decree is revealed only if they win, when tomorrow begins.</div>
+      <div class="deffect">Each of their decrees overturns a rule of the game. A gamble for the whole subreddit.</div>
+      ${bar}</div>`;
+    const d = tomorrow(f), spec = decreeSpec(d.kind);
+    return `<div class="dcard ${f} ${mine ? 'mine' : ''}">
+      <div class="dfac">${FACTION[f].name} <span class="muted">· ${FACTION[f].motto}</span></div>
+      <div class="dtitle">${d.title}</div>
+      <div class="drule">${d.text}</div>
+      <div class="deffect">${spec.effect}</div>
+      ${bar}
+    </div>`;
+  };
+  return `<section class="rcard vote2">
+    <h3>Tomorrow's Senate</h3>
+    <p class="muted">Tonight's vote decides which faction rules tomorrow. Its decree changes the rules and the bonus for everyone's campaign.</p>
+    ${on.includes('augures') ? '<p class="augurnote">🦅 The Augurs have taken the auspices: tonight they are on the ballot.</p>' : ''}
+    <div class="dcards${on.length > 2 ? ' three' : ''}">${on.map(card).join('')}</div>
+  </section>`;
+}
+
+/** "?" → The screen: every part of the interface, drawn with the game's own pieces. */
+function screenSheet(): string {
+  const item = (pic: string, name: string, what: string) => `<div class="uirow"><div class="uipic">${pic}</div><div><b>${name}</b>: ${what}</div></div>`;
+  const chipX = (icon: string, col: string, badge = '', cls = 'threat') => `<span class="chip ${cls}" style="--tc:${col}">${icon}<i>▲</i>${badge}</span>`;
+  const g = TRIBE_ART[0]!;
+  return `<div class="legend uisheet">
+  <p class="small">From top to bottom on a phone; on a wide screen the panel sits to the right of the map, with the same pieces.</p>
+  <h4>The map</h4>
+  ${item('🗺️', 'Board', 'pinch or scroll to zoom, drag to move; ⤢ shows the whole map again. Tap a dashed track to build it, a town to see it, a legion\'s standard to march it.')}
+  ${item(`<span class="lensdemo"><span class="on">Roads</span><span>Military</span></span>`, 'Roads / Military', 'two ways to look at the board. Military paints shielded roads gold and doomed roads red; it switches on by itself when trouble is coming.')}
+  ${item('<span class="tstars-demo">★★★<span class="cdemo">D</span></span>', 'Under a town', 'its stars (glory a turn) and coins (denarii a turn), then the icons of events that will strike it. Tap any of them for an explanation.')}
+  ${item('<span class="badge-demo">⚓</span>', 'Beside a name', 'an anchor for a port, a watchtower for a frontier town.')}
+  <h4>The panel</h4>
+  ${item('<span class="status-demo"><b>Turn 3:</b> +14 glory · +4 denarii</span>', 'Status line', 'what the last turn did (roads cut, towns cut off), or what to do next while a legion is marching.')}
+  ${item(`<span class="strip-demo"><span class="cell past">1–2</span><span class="cell cur"><span class="tn">Turn 3</span>${chipX('🔥', g, '<b class="bad">2</b>')}</span><span class="cell fog">5–10</span></span>`, 'Forecast strip', 'this turn and the next, one icon per event, ringed in its tribe\'s colour. A red number: roads it would cut now; a green ✓: you are safe. A dashed ring: an effect already in force. Tap an icon for its text and to light up the tribe\'s lands.')}
+  ${item('<span class="offer-demo">⚖️ <b>Publicani</b> <span class="gacc">Accept</span> <span class="gdec">Decline</span></span>', 'Gambit offer', 'a deal with a catch, shown only while it is open. Tap its name for the terms.')}
+  <h4>The bottom bar</h4>
+  ${item('<span class="mstat">🪙 <b>9</b><small>+2</small></span>', 'Treasury', 'denarii now, and what the end of the turn brings in.')}
+  ${item('<span class="mstat">★ <b>14</b><small>+6</small></span>', 'Glory', 'your glory so far, and what this turn will add.')}
+  ${item('<span class="mstat">⚑ <b>1</b><sup>1 idle</sup></span>', 'Legions', 'how many you have; red when one sits idle at the castra while a revolt is coming.')}
+  ${item(`<span class="mdec ${sc.decree.faction} on">📜 Decree <b>+3</b></span>`, 'Decree', 'the Senate\'s law of the day and what it is worth to you right now. Tap it to read it again.')}
+  ${item('<span class="icodemo">🔊 🎵 ?</span>', 'Sound, music, help', 'sound effects (on), music (off by default), and this help. On phones, a fourth button turns the game sideways.')}
+  ${item('<span class="btndemo">Recruit legion · Undo · End turn</span>', 'Buttons', 'recruit a legion (price in green if you can afford it), undo your last move, and end the turn. End turn shows what the turn will pay, and asks twice if the coming events would cut roads.')}
+  </div>`;
+}
+
+let rulesTab: 'rules' | 'events' | 'map' | 'ui' = 'rules';
+/** Illustrated legend for the "?" sheet, drawn with the same art as the board. */
+function legendSheet(): string {
+  const ic = (vb: string, inner: string, w = 64, h = 44) => `<svg viewBox="${vb}" width="${w}" height="${h}" aria-hidden="true">${inner}</svg>`;
+  const tile = (fill: string, props: string) => ic('-30 -20 60 40', `<path d="M-26,-14 L22,-18 L28,8 L-4,18 L-28,10 Z" fill="${fill}" stroke="#1d1409" stroke-width="2.4" stroke-linejoin="round"/>${props}`);
+  const tree = (x: number, y: number) => `<g transform="translate(${x},${y}) scale(.8)"><circle r="6.2" fill="#5f9a3c" stroke="#1d1409" stroke-width="1.3"/></g>`;
+  const hill = (x: number, y: number) => `<path d="M${x - 10},${y + 4} Q${x - 3},${y - 9} ${x + 10},${y + 4} Z" fill="#c49352" stroke="#1d1409" stroke-width="1.2"/>`;
+  const peakS = (x: number, y: number) => `<path d="M${x - 12},${y + 8} L${x},${y - 12} L${x + 12},${y + 8} Z" fill="#9b958a" stroke="#1d1409" stroke-width="1.3"/><path d="M${x - 4},${y - 5} L${x},${y - 12} L${x + 4},${y - 5} Z" fill="#fbfaf5"/>`;
+  const road = (cls: string) => `<g class="road ${cls}"><path d="M-28,0 H28" class="${cls === 'built' ? 'pave0' : 'track0'}"/>${cls === 'built' ? '<path d="M-28,0 H28" class="pave1"/><path d="M-28,0 H28" class="pave2"/>' : '<path d="M-28,0 H28" class="track1"/>'}</g>`;
+  const row = (icon: string, title: string, text: string) => `<div class="lgrow"><div class="lgic">${icon}</div><div><b>${title}</b> ${text}</div></div>`;
+  const R = sc.rules;
+  return `<div class="legend">
+  <h4>The land</h4>
+  ${row(tile('#b6c45a', tree(10, 2)), 'Plains', 'cheap ground: roads cost 1.')}
+  ${row(tile('#8fb04c', tree(-8, -2) + tree(6, 4) + tree(16, -4)), 'Light forest', 'roads cost 2.')}
+  ${row(tile('#c9a25e', hill(-6, 2) + hill(12, -2)), 'Hills', 'roads cost 3.')}
+  <p class="muted small">A road costs the <b>harder</b> of the two tiles it crosses, plus a little more the farther it reaches from the castra. The number on the milestone is the price.</p>
+  ${row(tile('#245a78', '<path d="M-14,0 q4,-6 8,0 M4,6 q4,-6 8,0" stroke="#cfe7ee" stroke-width="1.6" fill="none"/>') + tile('#8f897d', peakS(-6, 2) + peakS(10, 0)), 'Wild land', 'sea and mountains at the edges, lakes and primeval forests inland: no towns, no roads.')}
+  ${row(ic('-30 -20 60 40', '<path d="M-26,-10 Q-14,-18 -4,-4 T22,10" stroke="#1d1409" stroke-width="9" fill="none" stroke-linecap="round"/><path d="M-26,-10 Q-14,-18 -4,-4 T22,10" stroke="#5fb0cf" stroke-width="5.5" fill="none" stroke-linecap="round"/>'), 'River', 'between two towns that have no road between them.')}
+  ${row(ic('-30 -22 60 44', `<path d="M-26,-16 L26,-16 L26,16 L-26,16 Z" fill="#d9c48c" stroke="#1d1409" stroke-width="2"/><path d="M-26,-16 L26,-16" stroke="#e0b42a" stroke-width="6"/>`), 'Tribe', 'a Gallic people. Its lands have a thick border in its colour, stamped with its symbol (▲ ● ■ ◆); its name carries the same colour and symbol everywhere in the game. Tap an event icon in the forecast, or a tribe\'s name (in a town\'s panel or a message), to light up its lands.')}
+  <h4>Towns</h4>
+  ${row(ic('-36 -26 72 46', settlement(1, false, '#a24fd6')) + ic('-36 -28 72 48', settlement(3, false, '#a24fd6')), 'Gallic', 'not yet yours.')}
+  ${row(ic('-36 -26 72 46', settlement(1, true, '#2f86e0')) + ic('-42 -30 84 52', settlement(4, true, '#2f86e0')), 'Roman', 'linked to the castra: it pays glory (★) every turn.')}
+  <p class="muted small">Bigger settlements are worth more: hamlet ★, village ★★, oppidum or temple town ★★★, walled city ★★★★. A pale ★ means an event will add a star.</p>
+  ${row(ic('-14 -12 28 24', '<circle cx="0" cy="0" r="9" fill="#f2c230" stroke="#1d1409" stroke-width="2"/><text y="4" font-size="11" font-weight="bold" text-anchor="middle" fill="#8a5a0c" font-family="Georgia,serif">D</text>'), 'Coins', 'beside the stars: the denarii the town pays each turn once linked (towns of 3★ and more pay ★ − 2). A pale coin will come from a coming event.')}
+  ${row(ic('-12 -12 24 24', MINI.anchor!(0, 0)), 'Port', 'a town on the sea, with its jetty: pirates strike ports, and some decrees reward them.')}
+  ${row(ic('-12 -12 24 24', MINI.tower!(0, 0)), 'Frontier', 'a town by the mountains at the edge of the map, with its watchtower: Germanic warbands strike there.')}
+  <p class="muted small">Tap (or hover) any small symbol on the map, under or beside a town, to see what it means.</p>
+  ${row(ic('-30 -24 60 46', castraIcon()), 'Castra', 'your camp, where every road starts.')}
+  ${row(ic('-36 -30 72 52', settlement(2, true, '#f0b81c') + flame(-8, -2, 0.9) + flame(9, 2, 0.8) + '<g class="siegebadge" transform="translate(20,-16)"><circle r="10"/><text y="4.4">2</text></g>'), 'Besieged', `cut off from the castra: it burns when the red number runs out (${R.siegeTurns} turns). Reconnect it in time.`)}
+  ${row(ic('-30 -24 60 46', settlement(2, true, '#f0b81c') + '<g class="warnbadge" transform="translate(18,-14)"><circle r="10"/><text y="4.6">!</text></g>'), 'At risk', 'the forecast will cut this town off.')}
+  <h4>Roads and armies</h4>
+  ${row(ic('-30 -14 60 28', road('open') + '<g class="mile" transform="translate(0,0)"><path d="M-8,10 L-8,-4 Q-8,-11 0,-11 Q8,-11 8,-4 L8,10 Z"/><text y="4.5">3</text></g>'), 'Track', 'a road you can build; tap it. Hover (or press and hold) to see which towns it links and what it pays. A red price means you cannot afford it yet.')}
+  ${row(ic('-30 -14 60 28', road('built')), 'Paved road', 'built and holding.')}
+  ${row(ic('-30 -14 60 28', '<path d="M-28,0 H28" stroke="#3b2a1a" stroke-opacity=".55" stroke-width="9" stroke-dasharray="14 9"/><rect x="-18" y="-4" width="5" height="4" class="block" transform="rotate(30 -16 -2)"/><rect x="10" y="2" width="5" height="4" class="block"/><g class="ruinbadge"><rect x="-17" y="-10" width="34" height="20" rx="10"/><path d="M-10,-5 l5,5 m0,-5 l-5,5"/><text x="5" y="4.5">2</text></g>'), 'Destroyed', `rubble: it can be rebuilt when the number reaches 0 (${R.rubbleTurns} turns).`)}
+  ${row(ic('-30 -14 60 28', '<path d="M-28,0 H28" stroke="#ffd23a" stroke-opacity=".85" stroke-width="20"/>' + road('built')), 'Gold glow', '(military lens) shielded by a legion or garrison: revolts and raids cannot cut it.')}
+  ${row(ic('-30 -14 60 28', '<path d="M-28,0 H28" stroke="#ff2a1a" stroke-opacity=".6" stroke-width="20"/>' + road('built')), 'Red glow', 'the forecast will cut this road.')}
+  ${row(ic('-20 -40 40 52', '<line x1="0" y1="8" x2="0" y2="-28" stroke="#1d1409" stroke-width="2.4"/><circle cy="-30" r="3.4" fill="#e0b42a" stroke="#1d1409"/><path d="M0,-24 h15 v12 l-7.5,-3 l-7.5,3 z" fill="#1f5fa8" stroke="#1d1409"/>', 40, 44), 'Legion', `its standard. Shields every road touching its town; marches up to ${R.legionRange} roads once per turn.`)}
+  ${row(ic('-36 -26 72 50', '<ellipse cx="0" cy="6" rx="32" ry="21" fill="none" stroke="#5a3a1a" stroke-width="5" stroke-dasharray="3 1.6"/>' + settlement(2, true, '#2f86e0')), 'Garrison', 'palisade: shields its town and every neighbour, for good.')}
+  <h4>Events on the map</h4>
+  ${row(ic('-30 -20 60 40', `<path d="M-26,-14 L22,-18 L28,8 L-4,18 L-28,10 Z" fill="#8fb04c" stroke="#e0301e" stroke-width="4" stroke-dasharray="8 5"/>${pitchfork(-10, 0, -15)}${flame(10, 2, 1)}`), 'Revolt', 'red rim on the tribe\'s tiles; flames where a road will burn.')}
+  ${row(ic('-20 -20 40 40', swords(0, 0, 1)), 'Raiders', 'crossed swords next to the one road they will cut.')}
+  ${row(ic('-30 -20 60 40', `<path d="M-26,-14 L22,-18 L28,8 L-4,18 L-28,10 Z" fill="#8fb04c" stroke="#1d1409" stroke-width="2.4"/><path d="M-26,-14 L22,-18 L28,8 L-4,18 L-28,10 Z" fill="url(#lgRain)"/>${cloud(0, -2)}`), 'Rains', 'roads touching the tribe cost more; their milestones turn blue.')}
+  ${row(ic('-20 -20 40 40', sheaf(0, 0, 1.5)), 'Harvest', 'the tribe\'s tiles turn to wheat; its linked towns pay double.')}
+  ${row(ic('-20 -16 40 32', coins(0, 0, 1.2)), 'Tribute', 'linked towns of the tribe pay triple denarii.')}
+  ${row(ic('-22 -20 44 36', silverPeak(0, 0)), 'Silver vein', 'the town gains a star for the rest of the day.')}
+  ${row(ic('-20 -20 40 40', dagger(0, 0, 1)), 'Bandits', 'a dagger next to the cheapest road they will cut.')}
+  ${row(ic('-20 -20 40 40', pirateShip(0, 0, 1.5)), 'Pirates', 'black sails on the tribe\'s ports (towns on the sea): their unshielded roads will be cut.')}
+  ${row(ic('-20 -20 40 40', warband(0, 0, 1.5)), 'Germanic incursion', 'shields and spears on the tribe\'s frontier towns (by the mountains at the edge of the map).')}
+  ${row(ic('-20 -20 40 40', sickle(0, 0, 1.5)), 'Druid uprising', 'golden sickles on the tribe\'s tiles: a revolt that garrisons do not stop, only legions.')}
+  ${row(ic('-20 -18 40 34', bowl(0, 0, 1.5)), 'Famine', 'empty bowls: the tribe\'s linked towns pay no denarii that turn.')}
+  ${row(ic('-20 -20 40 40', snowflake(0, 0, 1.6)), 'Early snows', 'snowflakes: forest and hill roads there cost +2 for a while.')}
+  ${row(ic('-20 -20 40 40', amphora(0, 0, 1.5)), 'Grain shortage', 'empty amphorae: legions and garrisons cost +2 for a while.')}
+  ${row(ic('-20 -20 40 40', purse(0, 0, 1.5)), 'Merchant caravan', 'purses: +4 denarii if one of the tribe\'s towns is linked.')}
+  ${row(ic('-20 -20 40 40', olive(0, 0, 1.6)), 'Alliance', 'olive branches and a green tint: roads there cost 1 less for a while.')}
+  ${row(ic('-20 -20 40 40', stakes(0, 0, 1.6)), 'Veterans settle', 'stakes and a dashed ring: the town gets a free garrison if it is linked.')}
+  ${row(ic('-34 -14 68 28', `<g class="evrow"><rect x="-31" y="-11" width="62" height="22" rx="11" class="pill"/><circle cx="-11" cy="0" r="10" class="evnow"/>${MINI.revolt!(-11, 0)}<circle cx="11" cy="0" r="10" class="evnext"/>${MINI.harvest!(11, 0)}</g>`), 'Under a town', 'what the coming events do there. Solid red circle: this turn; dashed: next turn.')}
+  <svg width="0" height="0" style="position:absolute"><defs><pattern id="lgRain" width="8" height="8" patternUnits="userSpaceOnUse" patternTransform="rotate(25)"><line x1="0" y1="0" x2="0" y2="5" stroke="#2f6f9f" stroke-width="1.4"/></pattern></defs></svg>
+  </div>`;
+}
+/** What building a road would do, in one line: towns it links, glory and denarii per turn, its price. */
+function roadPreview(rid: number): string {
+  const r = sc.roads[rid]!, A = sc.towns[r.a]!.name, Bn = sc.towns[r.b]!.name;
+  const head = `<b>${A} – ${Bn}</b>`;
+  if (s.built[rid]) {
+    const prot = protectedTowns(sc, s), sh = prot[r.a] || prot[r.b];
+    return `${head}<br>Built${sh ? ' · shielded from revolts' : ' · not shielded: a revolt or raid can cut it'}`;
+  }
+  if (s.rubble[rid]) return `${head}<br>Rubble: can be rebuilt in ${s.rubble[rid]} turn${s.rubble[rid]! > 1 ? 's' : ''}`;
+  const cost = roadCost(sc, s, rid), a: Action = { type: 'road', road: rid };
+  const rich = cloneState(s); rich.denarii = 9999;
+  const why = checkAction(sc, rich, a);
+  if (why) return `${head}<br><span class="muted">${why}</span><br>${costTag(cost)}`;
+  const before = supplied(sc, s), after = supplied(sc, apply(sc, rich, a));
+  const gained = sc.towns.filter((t) => after[t.id] && !before[t.id]);
+  const glory = gained.reduce((n, t) => n + townValue(s, t), 0), den = gained.reduce((n, t) => n + townIncome(sc, townValue(s, t)), 0);
+  const what = gained.length ? `Links ${gained.map((t) => `${t.name} ${'★'.repeat(townValue(s, t))}`).join(', ')}: <b>+${glory} glory</b>${den ? ` · <b>+${den} denarii</b>` : ''} per turn`
+    : 'A second route: no new town, but your network survives if another road is cut';
+  return `${head}<br>${what}<br>${costTag(cost)}`;
+}
+function wireMapExtras() {
+  root.querySelector('#tutstart')?.addEventListener('click', () => startTutorial());
+  root.querySelector('#tutno')?.addEventListener('click', () => endTutorial('skip'));
+  root.querySelector('#tutskip')?.addEventListener('click', () => endTutorial('skip'));
+  root.querySelector('#tutnext')?.addEventListener('click', () => { if (tut) { tut.step++; render(); } });
+  root.querySelector('#tutreplay')?.addEventListener('click', () => startTutorial());
+  const el = tutTarget()?.el;
+  if (el) root.querySelector(el)?.classList.add('tutpulse');
+  // keep the coach bubble away from what it points at: top half target -> bubble at the bottom, and vice versa
+  const dock = root.querySelector<HTMLElement>('.dock.bottom'), mw = root.querySelector<HTMLElement>('.mapwrap');
+  const mark = root.querySelector<Element>('#map .tutglow, #map .tutring');
+  if (dock && mw && mark) {
+    const m = mark.getBoundingClientRect(), w = mw.getBoundingClientRect();
+    dock.classList.toggle('totop', m.top + m.height / 2 > w.top + w.height * 0.5);
+  }
+  // road preview: hover with a mouse, press and hold on touch
+  const wrap = root.querySelector<HTMLElement>('.mapwrap'), tip = root.querySelector<HTMLElement>('.rprev');
+  if (!wrap || !tip) return;
+  const show = (rid: number, x: number, y: number) => {
+    tip.innerHTML = roadPreview(rid); tip.style.display = '';
+    const r = wrap.getBoundingClientRect(), w = tip.offsetWidth, h = tip.offsetHeight;
+    tip.style.left = `${Math.max(4, Math.min(r.width - w - 4, x - r.left - w / 2))}px`;
+    tip.style.top = `${Math.max(4, y - r.top - h - 18)}px`;
+  };
+  const hide = () => { tip.style.display = 'none'; };
+  let hold: ReturnType<typeof setTimeout> | undefined;
+  root.querySelectorAll<SVGGElement>('#map g.road').forEach((g) => {
+    const rid = Number(g.dataset.road);
+    g.addEventListener('pointerenter', (e) => { if (e.pointerType === 'mouse') show(rid, e.clientX, e.clientY); });
+    g.addEventListener('pointermove', (e) => { if (e.pointerType === 'mouse') show(rid, e.clientX, e.clientY); });
+    g.addEventListener('pointerleave', (e) => { if (e.pointerType === 'mouse') hide(); });
+    g.addEventListener('pointerdown', (e) => {
+      if (e.pointerType === 'mouse') return;
+      const x = e.clientX, y = e.clientY;
+      hold = setTimeout(() => { show(rid, x, y); suppressClick = true; buzz(8); }, 420);
+    });
+    const cancel = () => { if (hold) clearTimeout(hold); hold = undefined; };
+    g.addEventListener('pointerup', () => { cancel(); if (suppressClick) setTimeout(() => { suppressClick = false; hide(); }, 1800); });
+    g.addEventListener('pointercancel', cancel);
+    g.addEventListener('pointerleave', cancel);
+  });
+}
+
+function coachBubble(): string {
+  const st = TUT_STEPS[tut!.step]!;
+  return `<div class="coach"><div class="cstep">Training · ${tut!.step + 1}/${TUT_STEPS.length}</div><div class="ctext">${st.text.replace('{where}', `<span class="where">${boardRotated ? 'on the left' : 'at the bottom'}</span>`)}</div>
+    <div class="cbtns">${st.next ? `<button id="tutnext" class="primary">${st.next}</button>` : ''}<button id="tutskip" class="link">Skip tutorial</button></div></div>`;
+}
+function tutPromptSheet(): string {
+  return `<div class="sheet tutsheet"><div class="sheetbox tutbox"><div class="dk">All Roads Lead to Rome</div><h2>First time in Gaul?</h2>
+    <p>A one-minute guided campaign: build roads, read the forecast, move a legion and weather a revolt.</p>
+    <button id="tutstart" class="primary">Start the tutorial</button><button id="tutno" class="link">Skip, I know the roads</button></div></div>`;
+}
+function decreeSheet(): string {
+  if (sc.decree.kind === 'none') return '';
+  const d = sc.decree, spec = decreeSpec(d.kind), ds = decreeStatus(sc, s), started = log.length > 0;
+  const fac = `${FACTION[d.faction].name} · ${FACTION[d.faction].motto}${d.faction === 'augures' ? ' · the Sibylline Books were opened' : ''}`;
+  return `<div class="sheet decreesheet"><div class="sheetbox decreebox ${d.faction}">
+    <div class="dk">Decree of the Senate · ${prettyDate(dateLabel)}</div>
+    <div class="dfac">${fac}</div>
+    <h2>📜 ${d.title}</h2>
+    <p class="drule">${d.text}</p>
+    <p class="deffect">${spec.effect}</p>
+    ${started ? `<div class="dprog">So far: ${ds.progress}${ds.bonus ? ` · <b>+${ds.bonus}</b> glory at dusk` : ''}</div>` : '<div class="dprog">The bonus is counted at dusk, after turn 10. Tap the decree banner any time to read it again.</div>'}
+    <button id="decreego" class="primary">${started ? 'Back to the campaign' : 'March on Gaul'}</button>
+  </div></div>`;
+}
+/** Where the castra sits on screen, in words ("on the left", "at the bottom"…), measured, not assumed. */
+function castraWhere(): string {
+  const t = document.querySelector('#map g.town[data-town="0"]')?.getBoundingClientRect(), m = document.querySelector('#map')?.getBoundingClientRect();
+  if (!t || !m || !m.width) return boardRotated ? 'on the left' : 'at the bottom';
+  const dx = (t.x + t.width / 2 - m.x) / m.width - 0.5, dy = (t.y + t.height / 2 - m.y) / m.height - 0.5;
+  return Math.abs(dx) > Math.abs(dy) ? (dx < 0 ? 'on the left' : 'on the right') : dy < 0 ? 'at the top' : 'at the bottom';
+}
+/** A gambit offer in the forecast: the deal, then Accept / Decline (or its status). */
+function gambitLine(e: GameEvent, when: string, offers: number[]): string {
+  // only open offers get a row (accepted, declined and closed ones live in the strip as icons)
+  const i = sc.events.indexOf(e), spec = eventSpec(e.kind), tribe = sc.tribes[e.tribe]!;
+  if ((s.accepted ?? []).includes(i) || declined.has(i) || !offers.includes(i) || isOver(sc, s) || tut) return '';
+  const text = spec ? spec.text({ who: tribe.name, town: e.town !== undefined ? sc.towns[e.town]!.name : '', when }).replace(/<[^>]+>/g, '') : e.kind;
+  return `<div class="offer"><button type="button" class="otitle" data-tip="${attr(`${spec?.title ?? 'Gambit'}: ${text}`)}">${EV_EMOJI[e.kind] ?? '⚖️'} <b>${spec?.title ?? e.kind}</b> ${tribeTag(tribe.id)} <span class="oi">ⓘ</span></button><button class="gacc" data-accept="${i}">Accept</button><button class="gdec" data-decline="${i}">Decline</button></div>`;
+}
+
+/** The compact layout's one-line bar above the buttons: treasury, glory, legions, decree, sound, help. */
+function miniBar(y: ReturnType<typeof yieldPerTurn>, ds: ReturnType<typeof decreeStatus>, idle: number, threat: boolean): string {
+  const gain = (n: number) => (n ? `<small>+${n}</small>` : '');
+  const dec = ds.bonus ? `+${ds.bonus}` : s.dGlory ? `+${s.dGlory}` : '';
+  const decTip = `${sc.decree.title}: ${sc.decree.text} (${ds.progress}). Tap to read the decree.`;
+  return `<div class="mini">
+    <span class="mstat" data-tip="${attr(`Treasury: ${s.denarii} denarii, +${y.income + y.bonusIncome} at the end of this turn.`)}">🪙 <b>${s.denarii}</b>${gain(y.income + y.bonusIncome)}</span>
+    <span class="mstat" data-tip="${attr(`Glory: ${s.glory}, +${y.glory + y.bonusGlory} at the end of this turn.`)}">★ <b>${s.glory}</b>${gain(y.glory + y.bonusGlory)}</span>
+    <span class="mstat${idle && threat ? ' warn' : ''}" data-tip="${attr(`${s.legions.length} legion${s.legions.length === 1 ? '' : 's'}${idle ? `, ${idle} idle at the castra${threat ? ' while a revolt looms' : ''}` : ''}.`)}">⚑ <b>${s.legions.length}</b>${idle ? `<sup>${idle} idle</sup>` : ''}</span>
+    ${tut ? '' : `<button id="decree" class="mdec ${sc.decree.faction}${dec ? ' on' : ''}" title="${attr(decTip)}">📜 <span class="mlabel">Decree</span>${dec ? ` <b>${dec}</b>` : ''}</button>`}
+    <span class="micons">${!isTouch() ? '' : `<button id="turn" title="${sideways ? 'Back to portrait' : 'Landscape view: turn your phone sideways'}">${sideways ? PHONE_UPRIGHT : PHONE_SIDEWAYS}</button>`}<button id="snd" title="${sound ? 'Sound effects on: tap to mute' : 'Sound effects off'}">${sound ? '🔊' : '🔇'}</button><button id="mus" class="${music ? '' : 'off'}" title="${music ? 'Music on: tap to stop' : 'Music off'}">🎵</button><button id="rules" title="How to play">?</button></span>
+  </div>`;
+}
+
+/** Light up one tribe's lands for a moment (from a tribe tag, or an event icon in the forecast). */
+function highlightTribe(k: number) {
+  hlTribe = k;
+  if (hlTimer) clearTimeout(hlTimer);
+  hlTimer = setTimeout(() => { hlTribe = null; if (view === 'map') render(); }, 2600);
+  render();
+}
+
+/** Escape text for an HTML attribute. */
+const attr = (x: string) => x.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
+
+// ---- explanations for small symbols: tap (or hover with a mouse) shows a bubble; it lives outside
+// the re-rendered root so hovering never forces a render.
+let tipEl: HTMLDivElement | null = null, tipTimer: ReturnType<typeof setTimeout> | undefined;
+function showTip(text: string, x: number, y: number, sticky: boolean) {
+  if (!text) return;
+  tipEl ??= Object.assign(document.createElement('div'), { className: 'tipbub' });
+  if (!tipEl.isConnected) document.body.appendChild(tipEl);
+  tipEl.textContent = text;
+  tipEl.style.display = 'block';
+  const w = Math.min(280, window.innerWidth - 16), left = Math.max(8, Math.min(window.innerWidth - w - 8, x - w / 2));
+  tipEl.style.width = `${w}px`; tipEl.style.left = `${left}px`;
+  const h = tipEl.offsetHeight, top = y - h - 14 < 8 ? y + 18 : y - h - 14;
+  tipEl.style.top = `${top}px`;
+  if (tipTimer) clearTimeout(tipTimer);
+  if (sticky) tipTimer = setTimeout(hideTip, 4500);
+}
+function hideTip() { if (tipEl) tipEl.style.display = 'none'; }
+
+/** Event icon kind → the event it stands for (most are the same). */
+const ICON_EVENT: Record<string, string> = { toll: 'rains', boom: 'silver', raid: 'raid', gambit: 'gambit' };
+/** The explanation shown when a player taps or hovers a small icon under a town. */
+function iconTip(kind: string, now: boolean): string {
+  const when = now ? 'at the end of this turn' : 'at the end of next turn';
+  if (kind === 'gambit') return `A gambit concerns this town's tribe ${when}: an offer with a catch. Accept or decline it in the forecast.`;
+  const spec = eventSpec(ICON_EVENT[kind] ?? kind);
+  if (!spec) return '';
+  const tone = spec.tone === 'threat' ? 'Hostile' : spec.tone === 'hardship' ? 'Hardship' : spec.tone === 'boon' ? 'Boon' : 'Gambit';
+  const timing = kind === 'toll' || kind === 'snows' || kind === 'alliance' ? (now ? 'in force now' : 'from next turn') : when;
+  return `${spec.title} (${tone}, ${timing}): ${spec.effectText}`;
+}
+
+/** Icon kinds by tone (t = hostile, h = hardship, b = boon): colours the circle under a town. */
+const ICON_TONE: Record<string, 't' | 'h' | 'b' | 'g'> = {
+  publicani: 'g', oppidum: 'g', frumentatio: 'g', argentarii: 'g', gambit: 'g',
+  revolt: 't', raid: 't', bandits: 't', druids: 't', pirates: 't', germani: 't', idus: 't', toll: 'h', famine: 'h', snows: 'h', levy: 'h',
+  harvest: 'b', tribute: 'b', boom: 'b', caravan: 'b', alliance: 'b', veterans: 'b',
+};
+/** Forecast emoji per event kind (falls back to the tone's). */
+const EV_EMOJI: Record<string, string> = {
+  revolt: '🔥', raid: '⚔️', bandits: '🗡️', druids: '🌙', pirates: '🏴', germani: '🪓', idus: '🗡️', rains: '🌧️', famine: '🥣', snows: '❄️', levy: '🏺',
+  publicani: '⚖️', oppidum: '🏰', frumentatio: '🍞', argentarii: '🏦', muster: '⚑',
+  harvest: '🌾', tribute: '🪙', silver: '⛰️', caravan: '💰', alliance: '🫒', veterans: '🛡️',
+};
+/** Every event in the game, by kind, with how a day's events are drawn. */
+function eventsSheet(): string {
+  const day = /^\d{4}-\d{2}-\d{2}$/.test(dateLabel) ? dateLabel : undefined, B = budgetAsOf(day), R = sc.rules, EVENTS = eventsAsOf(day);
+  const mini = (e: (typeof EVENTS)[number]) => {
+    const key = miniKey(e.kind, e.effect as never);
+    return `<svg viewBox="-12 -12 24 24" width="30" height="30" aria-hidden="true">${MINI[key]?.(0, 0) ?? ''}</svg>`;
+  };
+  const often = (e: (typeof EVENTS)[number]) => {
+    const same = EVENTS.filter((x) => x.tone === e.tone), share = e.gen.weight / same.reduce((n, x) => n + x.gen.weight, 0);
+    return share >= 0.5 ? 'common' : share >= 0.3 ? 'frequent' : 'occasional';
+  };
+  const group = (tone: 'threat' | 'hardship' | 'boon' | 'gambit', title: string, blurb: string, n: [number, number]) => `
+    <h4 class="tone-${tone[0]}">${title} <span class="muted small">${n[0] === n[1] ? n[0] : `${n[0]}–${n[1]}`} a day</span></h4><p class="muted small">${blurb}</p>
+    ${EVENTS.filter((e) => e.tone === tone && (e.gen.weight > 0 || sc.events.some((x) => x.kind === e.kind))).map((e) => `<div class="lgrow"><div class="lgic">${mini(e)}</div><div><b>${e.title}</b> <span class="muted small">· ${e.gen.rare ? 'rare (one a day at most)' : often(e)}, turns ${e.gen.minTurn}–${e.gen.maxTurn}${e.gen.maxPerDay > 1 ? `, up to ${e.gen.maxPerDay}×` : ''}</span><br>${e.effectText}</div></div>`).join('')}`;
+  return `<div class="legend events">
+    <p class="small">Each day's events are drawn at random, then fixed: everyone playing that day faces the same ones, on the same turns. Each strikes one tribe. You see them ${R.eventLookahead} turns ahead in the forecast, and on the map.</p>
+    ${group('threat', 'Hostile', 'They cut roads touching the tribe unless a legion or garrison shields them. Cut roads lie in rubble for ' + R.rubbleTurns + ' turns.', B.threat)}
+    ${group('hardship', 'Hardships', 'They make roads, troops or the tribe\'s pay costlier for a while.', B.hardship)}
+    ${B.gambit ? group('gambit', 'Gambits', 'Offers with a catch. Nothing happens unless you press Accept while the offer is in the forecast; accepting is final, and then each part happens on its turn.', B.gambit) : ''}
+    ${group('boon', 'Boons', 'They help: extra pay, cheaper roads or free defences, mostly for towns you have linked to the castra.', B.boon)}
+  </div>`;
+}
+function rulesSheet(): string {
+  const R = sc.rules;
+  const tabs = `<div class="tabs"><button data-tab="rules" class="${rulesTab === 'rules' ? 'on' : ''}">How to play</button><button data-tab="events" class="${rulesTab === 'events' ? 'on' : ''}">Events</button><button data-tab="map" class="${rulesTab === 'map' ? 'on' : ''}">Reading the map</button><button data-tab="ui" class="${rulesTab === 'ui' ? 'on' : ''}">The screen</button></div>`;
+  const rules = `<ul>
+    <li><b>Roads</b> (tracks with a milestone showing the cost) link towns to the castra. Linked towns turn Roman and pay their ★ in glory every turn; 3★+ towns also pay denarii.</li>
+    <li><b>Events</b> are scattered over each day's ${R.turns} turns, different every day, and each one strikes a tribe. They come in three kinds:
+      <b class="bad">hostile</b> events cut your unshielded roads, <b class="tone-h">hardships</b> make things costlier for a while, and <b class="tone-b">boons</b> help. Some days also bring a <b class="tone-g">gambit</b>: an offer with a catch that you may accept or let pass.
+      The forecast shows what happens this turn and next; <b>Events</b> (tab above) lists every event and what it does.</li>
+    <li><b>Legions</b> (standards) shield every road touching their town. Each marches up to ${R.legionRange} roads once per turn: tap its standard, then a ringed town (or tap a town for its orders). A cut-off legion can't move.</li>
+    <li><b>Garrisons</b> (palisade) shield their town and all its neighbours, for good.</li>
+    <li>A cut-off town burns its roads after ${R.siegeTurns} turns; legions inside are lost (−${R.lostLegionPenalty}).</li>
+    <li><b>The Senate's decree</b> changes the day's rules or pays a bonus (📜 banner). After playing, vote for tomorrow's: the <b>Populares</b> (glory and ambition) or the <b>Optimates</b> (order and caution). Some nights the <b>Augures</b> join the ballot with a sealed decree that overturns a rule of the game.</li>
+    <li><b>Score</b> = glory + Senate decree bonus − lost legions. Beat Caesar's score.</li></ul>
+    <button id="tutreplay">Replay the tutorial</button>`;
+  return `<div class="sheet"><div class="sheetbox"><button id="rulesx" class="x">×</button>${tabs}${rulesTab === 'rules' ? rules : rulesTab === 'events' ? eventsSheet() : rulesTab === 'ui' ? screenSheet() : legendSheet()}<div class="ver">${versionLabel()}</div></div></div>`;
+}
+function pickLegion(i: number) {
+  if (tut && !['standard', 'march'].includes(TUT_STEPS[tut.step]!.id)) { say('Follow the highlighted step, or skip the tutorial.', 2500); render(); return; }
+  if (moving === i) { moving = null; render(); return; }
+  const sup = supplied(sc, s);
+  const why = s.moved[i] ? 'already marched this turn' : !sup[s.legions[i]!] ? 'is cut off and cannot march'
+    : legionReach(sup)[i]!.size === 0 ? `has no town within ${sc.rules.legionRange} roads` : '';
+  if (why) { moving = null; msg = `Legio ${ROMAN[i] ?? i + 1} ${why}.`; play('error'); render(); return; }
+  moving = i; sel = null; msg = ''; render();
+}
+
+function render() {
+  tutCheck();
+  if (tut && tut.step >= TUT_STEPS.length) { endTutorial('done'); return; }
+  if (view === 'results') { renderResults(); return; }
+  if (compare) { renderCompare(); return; }
+  const over = isOver(sc, s);
+  const sup = supplied(sc, s);
+  const y = yieldPerTurn(sc, s, sup);
+  const idle = s.legions.filter((p, i) => p === sc.castra && !s.moved[i]).length;
+  const threat = visibleEvents(sc, s.turn, s).some(isThreat);
+  lens = moving !== null ? 'military' : lensOverride ?? autoLens();
+  const ds = decreeStatus(sc, s);
+  const prevWrap = root.querySelector<HTMLElement>('.mapwrap');
+  if (prevWrap) mapArea = { w: prevWrap.clientWidth, h: prevWrap.clientHeight };
+  boardRotated = chooseOrientation();
+  // phones and narrow posts: no header; everything it held sits in one bar above the buttons
+  const compact = !nativeWide() && !sideways;
+  $('app').innerHTML = `
+  <div class="layout${compact ? ' compact' : ''}">
+    <section class="mapcol"><div class="mapwrap${cam.z > 1.02 ? ' zoomed' : ''}"><div class="bgslot"></div>${svg()}
+    <div class="lens"><button data-lens="map" class="${lens === 'map' ? 'on' : ''}">Roads</button><button data-lens="military" class="${lens === 'military' ? 'on' : ''}">Military</button><span class="lensmode">${lensOverride ? 'manual' : 'auto'}</span></div>
+    <div class="rprev" style="display:none"></div>
+<button id="zoomreset" class="${cam.z > 1.02 ? 'show' : ''}" title="Show the whole map" aria-label="Show the whole map">⤢</button></div>
+    ${over ? `<button id="verdict" class="verdict">${practice ? 'Practice over · see results' : busy ? 'The Senate deliberates…' : "🏛️ Hear the Senate's verdict"}</button>` : ''}
+    ${tut ? `<div class="dock bottom">${coachBubble()}${msg ? `<div class="msg"><span>${msg}</span><button id="msgx" aria-label="Close">×</button></div>` : ''}</div>` : ''}
+    </section>
+    <aside class="side">
+    ${compact ? '' : `<header><div class="title"><span class="ttl"><b>All Roads Lead to Rome</b> <span class="muted">· ${dateLabel} · ${sc.decree.faction}</span>${practice ? ' <span class="practice">practice</span>' : ''}</span>
+      <span class="icons">${nativeWide() || !isTouch() ? '' : `<button id="turn" title="${sideways ? 'Back to portrait' : 'Landscape view: turn your phone sideways'}" aria-pressed="${sideways}">${sideways ? PHONE_UPRIGHT : PHONE_SIDEWAYS}</button>`}<button id="snd" title="${sound ? 'Sound effects on: tap to mute' : 'Sound effects off'}">${sound ? '🔊' : '🔇'}</button><button id="mus" class="${music ? '' : 'off'}" title="${music ? 'Music on: tap to stop' : 'Music off'}">🎵</button><button id="rules" title="How to play">?</button></span></div>
+      <div class="stats">Turn <b>${Math.min(s.turn, sc.rules.turns)}/${sc.rules.turns}</b> · <b>${s.denarii}</b> denarii <span class="muted">(+${y.income}${y.bonusIncome ? `<b class="harvest">+${y.bonusIncome}</b>` : ''}<span class="unit">/turn</span>)</span> · glory <b>${s.glory}</b> <span class="muted">(+${y.glory}${y.bonusGlory ? `<b class="harvest">+${y.bonusGlory}</b>` : ''}<span class="unit">/turn</span>)</span>
+        <span class="leg-inline${idle && threat && !over ? ' idlewarn' : ''}" title="${idle ? `${idle} legion(s) idle at the castra` : 'Legions'}">· ⚑ ${s.legions.length}${idle && !over ? `<sup>${idle} idle</sup>` : ''}</span></div>
+      <div class="stats legline${idle && !over ? ' idle' : ''}"><span class="legcount">⚑ ${s.legions.length} legion(s)${idle ? ' · ' : ''}</span>${idle && !over ? `<span class="${threat ? 'nudge' : 'muted'}">${idle} idle at the castra${threat ? ' while a revolt looms' : ''}</span>` : ''}</div>
+      ${tut ? '' : `<button class="decree ${sc.decree.faction}" id="decree" title="Read the Senate's decree"><b>📜 ${sc.decree.title}</b> <span class="dnow ${ds.bonus || s.dGlory ? 'on' : ''}">${ds.bonus ? `+${ds.bonus} now` : s.dGlory ? `+${s.dGlory} so far` : 'not yet'}</span>
+        <span class="dtext">${sc.decree.text} <span class="muted">(${ds.progress})</span></span><span class="dread">Read ›</span></button>`}</header>`}
+      <div class="sidebody">${over ? `<div class="overnote">Dusk has fallen on Gaul${practice ? ' (practice run)' : ''}. Take a last look at your roads.</div>` : `${statusLine()}${townPanel()}<div class="forecast">${forecast()}</div>`}</div>
+      ${compact ? miniBar(y, ds, idle, threat) : ''}
+      ${over ? '' : `<div class="bar"><button id="recruit">Recruit legion ${costTag(recruitCost(sc, s))}</button>
+        <button id="undo" ${undoStack.length ? '' : 'disabled'}>Undo</button>
+        <button id="end" class="primary endbtn${confirmEnd ? ' warn' : ''}">${confirmEnd ? `<span>⚠ ${forecastPreview(sc, s)?.cut.length ?? 0} cut · sure?</span><small>tap again to end</small>` : `<span>End turn</span><small>+${y.glory + y.bonusGlory} glory · +${y.income + y.bonusIncome} denarii</small>`}</button></div>`}
+    </aside>
+  </div>
+    ${showRules ? rulesSheet() : ''}${decreeModal ? decreeSheet() : ''}${tutPrompt ? tutPromptSheet() : ''}`;
+  attachBoard();
+  wireMapExtras();
+  root.querySelectorAll('.coach .where').forEach((el) => (el.textContent = castraWhere()));
+  root.querySelectorAll<HTMLElement>('.tribe[data-tribe]').forEach((el) => {
+    el.addEventListener('pointerdown', (e) => e.stopPropagation()); // not a map drag
+    el.onclick = (e) => { e.stopPropagation(); highlightTribe(Number(el.dataset.tribe)); };
+  });
+  wireZoom(root.querySelector<HTMLElement>('.mapwrap')!);
+  root.querySelector('#zoomreset')?.addEventListener('click', () => { cam.z = 1; cam.cx = NaN; render(); });
+  $('map').addEventListener('mouseover', (ev) => {
+    const t = (ev.target as Element).closest<SVGElement>('.tipme');
+    if (t) { const r = t.getBoundingClientRect(); showTip(t.dataset.tip ?? '', r.x + r.width / 2, r.y, false); }
+  });
+  $('map').addEventListener('mouseout', (ev) => { if ((ev.target as Element).closest('.tipme')) hideTip(); });
+  $('map').addEventListener('click', (ev) => {
+    const tip = (ev.target as Element).closest<SVGElement>('.tipme');
+    if (tip && !suppressClick) { const r = tip.getBoundingClientRect(); showTip(tip.dataset.tip ?? '', r.x + r.width / 2, r.y, true); return; }
+    hideTip();
+    if (suppressClick || over) return;
+    const leg = (ev.target as Element).closest('[data-leg]');
+    if (leg) { pickLegion(Number(leg.getAttribute('data-leg'))); return; }
+    const g = (ev.target as Element).closest('[data-road],[data-town]');
+    if (moving !== null) {
+      // movement mode: only a ringed town is a valid target; anything else cancels safely
+      const t = g?.hasAttribute('data-town') ? Number(g.getAttribute('data-town')) : -1;
+      const i = moving; moving = null;
+      if (legionReach(supplied(sc, s))[i]!.has(t)) act({ type: 'camp', legion: i, town: t }); else render();
+      return;
+    }
+    if (!g) return;
+    if (g.hasAttribute('data-road')) act({ type: 'road', road: Number(g.getAttribute('data-road')) });
+    else { const t = Number(g.getAttribute('data-town')); sel = sel === t ? null : t; msg = ''; render(); }
+  });
+  root.querySelectorAll<HTMLButtonElement>('[data-lens]').forEach((b) =>
+    (b.onclick = () => { const v = b.dataset.lens as typeof lens; lensOverride = v === autoLens() ? null : v; render(); }));
+  root.querySelector<HTMLButtonElement>('#turn')?.addEventListener('click', () => setSideways(!sideways));
+  $('app').classList.toggle('sideways', sideways && !nativeWide());
+  root.querySelector('#decree')?.addEventListener('click', () => { decreeModal = true; render(); });
+  root.querySelector('#decreego')?.addEventListener('click', () => {
+    decreeModal = false;
+    try { localStorage.setItem(decreeSeenKey(dateLabel), '1'); } catch { /* storage unavailable */ }
+    play('turn'); render();
+  });
+  $('snd').onclick = () => { sound = !sound; setSound(sound); if (sound) play('turn'); render(); };
+  $('mus').onclick = () => { music = !music; setMusic(music); render(); };
+  $('rules').onclick = () => { showRules = !showRules; render(); };
+  root.querySelector('#rulesx')?.addEventListener('click', () => { showRules = false; render(); });
+  root.querySelectorAll<HTMLButtonElement>('[data-tab]').forEach((b) => (b.onclick = () => { rulesTab = b.dataset.tab as typeof rulesTab; render(); }));
+  root.querySelector('#msgx')?.addEventListener('click', () => { say('', 0); render(); });
+  root.querySelector('#verdict')?.addEventListener('click', () => { view = 'results'; render(); });
+  root.querySelectorAll<HTMLButtonElement>('[data-vote]').forEach((b) => (b.onclick = () => void doVote(b.dataset.vote as Faction)));
+  root.querySelector<HTMLButtonElement>('#share')?.addEventListener('click', () => void doShare());
+  root.querySelector<HTMLButtonElement>('#join')?.addEventListener('click', () => void doJoin());
+  if (!over) {
+    $('recruit').onclick = () => act({ type: 'recruit' });
+    // forecast icons and offer titles explain themselves (tap, or hover with a mouse)
+    const side = root.querySelector<HTMLElement>('.sidebody');
+    const mini = root.querySelector<HTMLElement>('.mini');
+    mini?.addEventListener('click', (ev) => { const t = (ev.target as Element).closest<HTMLElement>('.mstat[data-tip]'); if (t) { const r = t.getBoundingClientRect(); showTip(t.dataset.tip ?? '', r.x + r.width / 2, r.y, true); } });
+    mini?.addEventListener('mouseover', (ev) => { const t = (ev.target as Element).closest<HTMLElement>('.mstat[data-tip]'); if (t) { const r = t.getBoundingClientRect(); showTip(t.dataset.tip ?? '', r.x + r.width / 2, r.y, false); } });
+    mini?.addEventListener('mouseout', (ev) => { if ((ev.target as Element).closest('.mstat')) hideTip(); });
+    side?.addEventListener('mouseover', (ev) => { const t = (ev.target as Element).closest<HTMLElement>('[data-tip]'); if (t) { const r = t.getBoundingClientRect(); showTip(t.dataset.tip ?? '', r.x + r.width / 2, r.y, false); } });
+    side?.addEventListener('mouseout', (ev) => { if ((ev.target as Element).closest('[data-tip]')) hideTip(); });
+    side?.addEventListener('click', (ev) => {
+      const t = (ev.target as Element).closest<HTMLElement>('[data-tip]');
+      if (!t) return;
+      const r = t.getBoundingClientRect();
+      showTip(t.dataset.tip ?? '', r.x + r.width / 2, r.y, true);
+      if (t.dataset.hl !== undefined) highlightTribe(Number(t.dataset.hl)); // and light up the tribe's lands
+    });
+    root.querySelectorAll<HTMLElement>('[data-accept]').forEach((b) => (b.onclick = () => act({ type: 'accept', event: Number(b.dataset.accept) })));
+    root.querySelectorAll<HTMLElement>('[data-decline]').forEach((b) => (b.onclick = () => { declined.add(Number(b.dataset.decline)); play('turn'); render(); }));
+    root.querySelectorAll<HTMLElement>('[data-undecline]').forEach((b) => (b.onclick = () => { declined.delete(Number(b.dataset.undecline)); render(); }));
+    $('undo').onclick = undo;
+    $('end').onclick = () => act({ type: 'end' });
+    root.querySelectorAll<HTMLButtonElement>('[data-camp]').forEach((b) => {
+      b.onclick = () => act({ type: 'camp', legion: Number(b.dataset.camp), town: sel! });
+      const hl = (on: boolean) => root.querySelectorAll(`.standard[data-leg="${b.dataset.camp}"]`).forEach((g) => g.classList.toggle('hl', on));
+      b.onmouseenter = () => hl(true); b.onmouseleave = () => hl(false);
+      b.onfocus = () => hl(true); b.onblur = () => hl(false);
+    });
+    const g = root.querySelector<HTMLButtonElement>('[data-garrison]');
+    if (g) g.onclick = () => act({ type: 'garrison', town: sel! });
+  }
+}
+
