@@ -1,7 +1,7 @@
 import { expect, test } from 'vitest';
 import {
   adjacency, apply, bridges, EVENTS, generate, hubs, initialState, isOver, legalActions, longestRoad, replay, roadCost, score, supplied,
-  townValue, yieldPerTurn, Rng, DECREES, budgetAsOf, recruitCost, garrisonCost, shores, gambitOffers, liveEvents, protectedTowns, checkAction, dealTown, decreeStatus,
+  townValue, yieldPerTurn, Rng, DECREES, budgetAsOf, recruitCost, garrisonCost, shores, gambitOffers, liveEvents, protectedTowns, checkAction, dealTown, decreeStatus, eventsAsOf, LOAN, heldAt, cutsAt,
 } from './index';
 import type { Action, Road, Scenario } from './index';
 
@@ -194,7 +194,7 @@ test('procedural events: budgets, windows, caps and spacing hold across many see
     // (a shore threat stays put when no other tribe has ports / a frontier)
     for (let i = 1; i < threats.length; i++) if (!(threats[i]!.effect.type === 'cut' && (threats[i]!.effect as { where?: string }).where)) expect(threats[i]!.tribe).not.toBe(threats[i - 1]!.tribe);
     for (const e of sc.events) {
-      const spec = EVENTS.find((x) => x.kind === e.kind)!;
+      const spec = eventsAsOf().find((x) => x.kind === e.kind)!; // latest registry, revisions applied
       expect(e.turn).toBeGreaterThanOrEqual(spec.gen.minTurn);
       expect(e.turn).toBeLessThanOrEqual(spec.gen.maxTurn);
       expect(e.effect).toEqual(spec.effect);
@@ -339,4 +339,63 @@ test('decree hooks: depth cap, garrison deals, ports shield, hub cut, inverted s
   for (const a of legalActions(mr, sm).filter((x) => x.type === 'road').slice(0, 1)) sm = apply(mr, sm, a);
   sm = apply(mr, sm, { type: 'end' });
   expect(decreeStatus(mr, sm).bonus).toBe(0);
+});
+
+test('per-turn decree glory is reported under the decree, not the towns', async () => {
+  const { dailyScenario } = await import('../daily');
+  const { scenario: sc } = dailyScenario('2026-11-15', 'populares');
+  expect(sc.decree.kind).toBe('legatio');
+  // random play until a game earns some embassy glory
+  let s = initialState(sc);
+  for (let k = 0; k < 50 && !(s.dGlory ?? 0); k++) {
+    const rng = new Rng(`emb${k}`);
+    s = initialState(sc);
+    while (!isOver(sc, s)) { const acts = legalActions(sc, s); s = apply(sc, s, rng.next() < 0.3 ? acts[acts.length - 1]! : rng.pick(acts)); }
+  }
+  const b = score(sc, s);
+  expect(s.dGlory ?? 0).toBeGreaterThan(0);
+  expect(b.decree).toBe(s.dGlory);
+  expect(b.glory + b.decree - b.penalty).toBe(b.total);
+  expect(b.decreeMet).toBe(true);
+});
+
+test('money-lenders: from 16 Nov the loan is paid on acceptance; earlier days keep the old loan', () => {
+  const now = eventsAsOf('2026-11-16').find((e) => e.kind === 'argentarii')!;
+  const old = eventsAsOf('2026-11-15').find((e) => e.kind === 'argentarii')!;
+  expect(old.effect.type === 'gambit' && old.effect.parts.some((p) => p.now)).toBe(false);
+  expect(now.effect.type === 'gambit' && now.effect.parts[0]!.now).toBe(true);
+  // a day with the loan on offer this turn: accept, and the coins are in the treasury at once
+  const base = generate('loan-test', { asOf: '2026-11-16' });
+  const sc = { ...base, events: [{ turn: 1, kind: 'argentarii', tribe: 0, effect: now.effect }] };
+  const s0 = initialState(sc);
+  const s1 = apply(sc, s0, { type: 'accept', event: 0 });
+  expect(s1.denarii).toBe(s0.denarii + LOAN.now);
+  // and nothing more is paid at the end of the turn: only the repayment remains on the calendar
+  expect(liveEvents(sc, s1).filter((e) => e.from === 0).map((e) => e.turn)).toEqual(Array.from({ length: LOAN.count }, (_, k) => 2 + k)); // instalments on the turns after the offer
+});
+
+test('heldAt: roads saved by a legion or garrison, never ones that were cut', () => {
+  let saw = 0;
+  for (let d = 0; d < 40; d++) {
+    const sc = generate(`held-${d}`);
+    let s = initialState(sc);
+    // a crude player: build the cheapest buildable road each turn and camp the first legion on a supplied town
+    for (let turn = 1; turn <= sc.rules.turns; turn++) {
+      const road = sc.roads.filter((r) => !checkAction(sc, s, { type: 'road', road: r.id })).sort((a, b) => a.cost - b.cost)[0];
+      if (road) s = apply(sc, s, { type: 'road', road: road.id });
+      const sup = supplied(sc, s), town = sc.towns.find((t) => sup[t.id] && t.id !== sc.castra && !checkAction(sc, s, { type: 'camp', legion: 0, town: t.id }));
+      if (town && s.legions.length) s = apply(sc, s, { type: 'camp', legion: 0, town: town.id });
+      const held = heldAt(sc, s, s.turn), cut = new Set(cutsAt(sc, s, s.turn));
+      for (const h of held) {
+        expect(cut.has(h.road)).toBe(false);
+        expect(s.built[h.road]).toBe(true);
+        const r = sc.roads[h.road]!;
+        expect([r.a, r.b]).toContain(h.by);
+        expect(h.by).not.toBe(sc.castra);
+        saw++;
+      }
+      s = apply(sc, s, { type: 'end' });
+    }
+  }
+  expect(saw).toBeGreaterThan(0);
 });

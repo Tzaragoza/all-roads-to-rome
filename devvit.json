@@ -28,6 +28,20 @@
         "location": "subreddit",
         "forUserType": "moderator",
         "endpoint": "/internal/menu/post-create"
+      },
+      {
+        "label": "Post the Demo",
+        "description": "Create the All Roads Lead to Rome Demo post (one map, endless replays)",
+        "location": "subreddit",
+        "forUserType": "moderator",
+        "endpoint": "/internal/menu/demo-create"
+      },
+      {
+        "label": "All Roads: today's status",
+        "description": "Today's post, players and votes, and when the daily job last ran",
+        "location": "subreddit",
+        "forUserType": "moderator",
+        "endpoint": "/internal/menu/status"
       }
     ]
   },
@@ -40,7 +54,8 @@
         "SUBSCRIBE_TO_SUBREDDIT"
       ]
     },
-    "redis": true
+    "redis": true,
+    "journeys": true
   },
   "triggers": {
     "onAppInstall": "/internal/triggers/on-app-install"
@@ -65,7 +80,7 @@
         "helpText": "What happens when someone plays an older day's post. Late plays never extend streaks, and voting closes when the day ends.",
         "options": [
           {
-            "label": "Scored, marked as late (\u23f1) on that day's board",
+            "label": "Scored, marked as late (⏱) on that day's board",
             "value": "flagged"
           },
           {

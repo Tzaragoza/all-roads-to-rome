@@ -14,6 +14,7 @@ export function addDays(date: string, n: number): string {
 }
 
 export function prettyDate(date: string): string {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return date === DEMO_KEY ? 'the Demo' : date; // the Demo post's store key
   return new Date(`${date}T00:00:00Z`).toLocaleDateString('en-GB', { day: 'numeric', month: 'long', timeZone: 'UTC' });
 }
 
@@ -47,5 +48,14 @@ export const ballotFor = (date: string): Faction[] => (augurBallot(date) ? ['pop
 /** Default faction of a date when nobody voted. */
 export const defaultFaction = (date: string): Faction => dailyScenario(date).scenario.decree.faction;
 
-/** The data stored on each daily post. */
-export type DailyPostData = { date: string; faction: Faction };
+/**
+ * The data stored on each daily post. `demo`: the Demo post, a showcase that replays one frozen, already
+ * published map (DEMO_DATE) as often as anyone likes, on its own board (stored under DEMO_KEY, never the day's).
+ */
+export type DailyPostData = { date: string; faction: Faction; demo?: boolean };
+
+/** The Demo post's map: a published day (never changes), chosen for its spread of events, a gambit and a decree. */
+export const DEMO_DATE = '2026-11-16';
+export const DEMO_FACTION: Faction = 'optimates';
+/** Redis "day" under which the Demo's board, runs and votes live (kept apart from DEMO_DATE's real board). */
+export const DEMO_KEY = 'demo';

@@ -8,6 +8,7 @@ import { DECREES, DEFAULT_RULES, budgetAsOf, eventsAsOf } from '../../src/shared
 import type { DecreeSpec, EventSpec, Faction } from '../../src/shared/engine';
 import { AUGUR_ODDS } from '../../src/shared/daily';
 import { rulebookStamp } from '../../src/shared/rulebook-stamp';
+import { ACHIEVEMENTS } from '../../src/shared/achievements';
 import {
   castraIcon, coins, flame, MINI, miniKey, pitchfork, settlement, silverPeak, swords, TRIBE_ART,
 } from '../../src/client/arlr/board-art';
@@ -98,7 +99,7 @@ add(`${h1('The Campaign at a Glance', 'Liber I')}
 <tr><td>${town(2, false, TRIBE_ART[2]!)}</td><td><b>Gallic town</b>: not yet yours. Its ★ are its worth: glory per turn once linked.</td></tr>
 <tr><td>${town(3, true, TRIBE_ART[1]!)}</td><td><b>Roman town</b>: linked to the castra by your roads, so it pays.</td></tr>
 <tr><td>${svg('-30 -10 60 20', '<text x="-4" y="5" font-size="13" text-anchor="end" fill="#f2c230" stroke="#1d1409" stroke-width="3" paint-order="stroke">★★★</text><circle cx="8" cy="0" r="6" fill="#f2c230" stroke="#1d1409" stroke-width="1.4"/><text x="8" y="2.6" font-size="7.5" font-weight="bold" text-anchor="middle" fill="#8a5a0c">D</text>', 64, 22)}</td><td><b>★ and coins</b> under a town: the glory and the denarii it pays each turn once linked. A pale ★ or coin is coming from an event.</td></tr>
-<tr><td>${svg('-22 -11 44 22', `<g transform="translate(-11,0)">${MINI.anchor!(0, 0)}</g><g transform="translate(11,0)">${MINI.tower!(0, 0)}</g>`, 48, 24)}</td><td><b>Port</b> (anchor, with a jetty on its shore) and <b>frontier</b> town (watchtower, by the mountains at the map's edge).</td></tr>
+<tr><td>${svg('-22 -11 44 22', `<g transform="translate(-11,0)">${MINI.anchor!(0, 0)}</g><g transform="translate(11,0)">${MINI.tower!(0, 0)}</g>`, 48, 24)}</td><td><b>Port</b> (anchor, with a jetty on its shore) and <b>frontier</b> town (watchtower, by the mountains at the map's edge). The badge sits at the end of the town's row of stars and coins.</td></tr>
 <tr><td>${ICONS.track}</td><td><b>Track</b>: a road you may build. The milestone shows its price.</td></tr>
 <tr><td>${ICONS.road}</td><td><b>Paved road</b>: built and holding.</td></tr>
 <tr><td>${ICONS.standard}</td><td><b>Legion</b>: a standard. It shields every road touching its town and can march.</td></tr>
@@ -171,7 +172,7 @@ ${fig('tut-forecast', 'The forecast strip: this turn and the next, one icon per 
 <div class="cols2">
 <div>
 <h2>Gambits</h2>
-<p>A gambit is a deal: tax farmers, money-lenders, a grain dole, an oppidum. It appears in the forecast with <b>Accept</b> and <b>Decline</b>. Accept while it is in the forecast and each part of the deal happens on its turn; accepting is final. Let it pass and nothing happens. Caesar weighs every offer, and takes each of them on some maps but not on others.</p>
+<p>A gambit is a deal: tax farmers, money-lenders, a grain dole, an oppidum. It appears in the forecast with <b>Accept</b> and <b>Decline</b>. Accept while it is in the forecast and each part of the deal happens on its turn; accepting is final. Let it pass and nothing happens. <b>Caesar never takes a gambit</b>: they are your edge. Each is balanced for a player who reads the forecast: worth taking on average, but it can backfire.</p>
 <p class="small">Rare events (the druids, the veterans) come at most once a day. The full list is in the Almanac, and in the game under ? → Events.</p>
 </div>
 <div>${fig('gambit', 'A gambit in the forecast.')}</div>
@@ -204,7 +205,7 @@ add(`${h1('Dusk: the Score', 'Liber V')}
 <div class="cols2">
 <div>
 <h2>Caesar</h2>
-<p>Caesar's score is the best result our solver found for that day, under the day's decree, playing the same events with the same 2-turn forecast you had. It is a strong target, not a perfect one: a sharp legate can beat it. The results page draws your score turn by turn against Caesar's and your rivals'.</p>
+<p>Caesar's score is the best result our solver found for that day, under the day's decree, playing the same map and events. To plan, the solver simulates the whole day, so in effect it sees further than your 2-turn forecast; it never takes a gambit. It is a strong target, not a perfect one: a sharp legate can beat it. The results page draws your score turn by turn against Caesar's and your rivals'.</p>
 <h2>Leaderboard, rivals and streaks</h2>
 <p>Each day has its leaderboard. Follow rivals to see their curves next to yours, and press <b>Compare</b> to replay both campaigns turn by turn on the map: their roads, forts and legions drawn over yours. Only once you have finished, and only for generals you follow; Caesar's own plan is never shown, so the answer cannot be copied. Playing on consecutive days builds a streak. Older posts can still be played; depending on the subreddit's setting, those scores are flagged as late or kept off the board.</p>
 ${box('A worked dusk', `<p>Over ten turns your towns paid <b>212 glory</b>. The decree, <i>Fortified hubs</i>, pays +3 for each of your 4 hubs: <b>+12</b>. One legion was lost in a burning town: <b>−${R.lostLegionPenalty}</b>. Score: 212 + 12 − ${R.lostLegionPenalty} = <b>${212 + 12 - R.lostLegionPenalty}</b>. Caesar scored 230: so close.</p>`)}
@@ -220,8 +221,10 @@ ${box('A worked dusk', `<p>Over ten turns your towns paid <b>212 glory</b>. The 
 <li><b>Gambits are not free.</b> Take a deal when it fits your plan, not because it is offered.</li>
 <li><b>Ports and frontier towns are targets.</b> Pirates and warbands strike only there: shield them when the sails or spears appear.</li>
 <li><b>Practise.</b> After your campaign you can replay the day as often as you like. Practice never changes your rank, but every attempt is kept: you see your <b>personal best</b> of the day, and so do your rivals.</li>
+<li><b>Skirmish.</b> Once today's campaign is played, fight extra maps from a pool of checked battlefields, each with its own decree and Caesar's score: 300 in Gaul and 300 in Egypt (the same game under the Nile: Egyptian towns, peoples, events and art). Unranked; challenge a friend on the same map number.</li>
+<li><b>The Demo.</b> Some subreddits pin a <i>Demo</i> post: one fixed province with Caesar's score, played as often as you like. Every run is scored and your best goes on the Demo's own board; it never touches your streak or the daily leaderboard. First-timers start with the guided campaign there (skippable).</li>
 </ul>
-${box('Training', '<p>New legates are offered a one-minute guided campaign on a small map. It can be replayed at any time from ? → Replay the tutorial.</p>')}
+${box('Training', '<p>New legates are offered a two-minute guided campaign on a small map. It can be replayed at any time from ? → Replay the tutorial.</p>')}
 </div>
 </div>`);
 
@@ -237,6 +240,11 @@ for (const f of ['populares', 'optimates', 'augures'] as Faction[]) {
 ${i === 0 ? `<p class="small" style="color:${FACTION[f].col}"><b>${FACTION[f].motto[0]!.toUpperCase() + FACTION[f].motto.slice(1)}.</b> ${FACTION[f].blurb}</p>` : ''}
 <div class="cards">${part.map(decreeCard).join('')}</div>`));
 }
+
+// honours: the 20 achievements
+add(`${h1('Honours of the Legion', 'Almanac')}
+<p class="small">Twenty-three honours mark a legate's career, in copper, silver and gold. Each is won once and keeps the date it was won and how (tap a won honour on the results page: "Scored 230 against Caesar's 215 in the campaign of 20 November"); the results page shows how many you hold and how rare each one is. None asks more than a hundred campaigns, and no streak is longer than seven days.</p>
+<div class="honours">${[...new Set(ACHIEVEMENTS.map((a) => a.group))].map((g) => `<h3>${g}</h3>${ACHIEVEMENTS.filter((a) => a.group === g).map((a) => `<div class="hon"><span class="hmedal ${a.tier}">${a.glyph}</span><div><b>${a.name}</b> <i>${a.tier}</i><br><span>${a.how}</span></div></div>`).join('')}`).join('')}</div>`);
 
 // back: quick reference
 add(`${h1('Quick Reference', 'Tabula')}
@@ -282,6 +290,12 @@ add(`${h1('Quick Reference', 'Tabula')}
 
 // ---------------------------------------------------------------- document
 const css = `
+.honours{columns:2;column-gap:7mm}.honours h3{break-after:avoid;margin:3mm 0 1mm;font-size:11pt;text-transform:uppercase;letter-spacing:.06em;color:#7a5a2a}
+.hon{display:flex;gap:2.5mm;align-items:center;break-inside:avoid;margin:0 0 1.8mm;font-size:9.5pt;line-height:1.25}.hon i{color:#8a7a5a;font-size:8pt}
+.hmedal{flex:none;display:inline-flex;align-items:center;justify-content:center;width:9mm;height:9mm;border-radius:50%;border:.5mm solid;font-size:10pt;font-weight:bold}
+.hmedal.copper{background:radial-gradient(circle at 35% 30%,#f3b98c,#b87333 55%,#7a4519);border-color:#6b3c15}
+.hmedal.silver{background:radial-gradient(circle at 35% 30%,#fff,#c4c7cc 55%,#868b93);border-color:#6d7178}
+.hmedal.gold{background:radial-gradient(circle at 35% 30%,#fff4b0,#e0b12e 55%,#9c7414);border-color:#7f5d0d}
 @font-face{font-family:Garamond;src:url(${font('docs/fonts/eb-garamond-latin-400-normal.woff2')});font-weight:400}
 @font-face{font-family:Garamond;src:url(${font('docs/fonts/eb-garamond-latin-400-italic.woff2')});font-weight:400;font-style:italic}
 @font-face{font-family:Garamond;src:url(${font('docs/fonts/eb-garamond-latin-600-normal.woff2')});font-weight:600}

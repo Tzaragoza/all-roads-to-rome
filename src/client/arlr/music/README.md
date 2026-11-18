@@ -1,6 +1,6 @@
 # Your own music
 
-Drop **one** audio file in this folder (`theme.ogg`, `theme.mp3` or `theme.m4a`; any name works, the first file
+Drop **one** audio file in this folder (an `.m4a` copy beside an `.ogg` is used only where OGG can't play, e.g. older iPhones) (`theme.ogg`, `theme.mp3` or `theme.m4a`; any name works, the first file
 alphabetically is used) and rebuild. The game then loops your track instead of the generated music.
 Delete the file to go back to the generated music.
 

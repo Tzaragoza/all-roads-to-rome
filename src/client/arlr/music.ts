@@ -171,7 +171,13 @@ export async function renderPreview(seconds: number, sampleRate = 44100): Promis
 
 // A composed track, if one was dropped in ./music/: looped by an <audio> element.
 const TRACKS = import.meta.glob('./music/*.{ogg,mp3,m4a,wav}', { eager: true, query: '?url', import: 'default' }) as Record<string, string>;
-const TRACK = Object.keys(TRACKS).sort().map((k) => TRACKS[k]!)[0];
+// OGG loops without a gap; an AAC copy (.m4a) is the fallback for browsers that can't play OGG (older iPhones)
+const canOgg = () => { try { return typeof Audio !== 'undefined' && new Audio().canPlayType('audio/ogg; codecs="vorbis"') !== ''; } catch { return false; } };
+const TRACK = (() => {
+  const keys = Object.keys(TRACKS).sort();
+  const pick = keys.find((k) => (canOgg() ? /\.ogg$/ : /\.(m4a|mp3)$/).test(k)) ?? keys[0];
+  return pick ? TRACKS[pick] : undefined;
+})();
 const FILE_VOL = 0.35;
 let audio: HTMLAudioElement | null = null;
 /** True when a composed track replaces the generated music. */
@@ -181,7 +187,10 @@ function start() {
   if (TRACK) {
     try {
       audio ??= Object.assign(new Audio(TRACK), { loop: true, volume: FILE_VOL });
-      void audio.play().catch(() => { started = false; });
+      // fade in over a second instead of starting at full volume (HTMLAudio has no ramp: step it)
+      const a = audio; a.volume = 0.01;
+      let k = 0; const step = setInterval(() => { k++; a.volume = Math.min(FILE_VOL, (FILE_VOL * k) / 10); if (k >= 10) clearInterval(step); }, 100);
+      void a.play().catch(() => { started = false; clearInterval(step); });
       started = true;
     } catch { /* no audio available */ }
     return;

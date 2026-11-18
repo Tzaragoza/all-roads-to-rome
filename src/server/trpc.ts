@@ -1,16 +1,18 @@
 import { initTRPC, TRPCError } from '@trpc/server';
 import { transformer } from '../shared/transformer';
 import { Context } from './context';
-import { context, reddit, settings } from '@devvit/web/server';
+import { context, reddit, redis, settings } from '@devvit/web/server';
 import { z } from 'zod';
-import { dailyScenario, dateKey } from '../shared/daily';
+import { dailyScenario, dateKey, DEMO_DATE, DEMO_FACTION, DEMO_KEY, prettyDate } from '../shared/daily';
 import type { DailyPostData } from '../shared/daily';
 import {
-  castVote, challengeLine, rivalPlan, getPractice, submitPractice, checkShare, factionFor, flairFor, followRival, GameError, resetDay, resetPlayer, rivalsFor,
+  castDemoVote, castVote, challengeLine, submitDemo, rivalPlan, getPractice, submitPractice, getAchievements, awardFor, skirmishRecords, skirmishUnlocked, submitSkirmish, avatarsFor, flairInputs, checkShare, factionFor, flairFor, followRival, GameError, resetDay, resetPlayer, rivalsFor,
   unfollowRival, getMyVote, getResult, getStreak, getVotes, historyFor, LATE_POLICIES, leaderboard, shareText,
   recordTutorial, submitResult, tutorialDone, tutorialStats, wouldRank,
 } from './core/game';
 import type { LatePolicy } from './core/game';
+import type { AchId } from '../shared/achievements';
+import { ensureTodayPost } from './core/post';
 
 const t = initTRPC.context<Context>().create({ transformer });
 
@@ -48,6 +50,11 @@ async function postDate(): Promise<string> {
   }
 }
 
+/** Is this the Demo post (one frozen map, replayed at will, its own board)? Its store key stands in for the date. */
+const isDemo = () => !!(context.postData as Partial<DailyPostData> | undefined)?.demo;
+/** The store key of this post: its date, or DEMO_KEY on the Demo. */
+async function postKey(): Promise<string> { return isDemo() ? DEMO_KEY : postDate(); }
+
 /** The subreddit's late-play rule (moderator setting `latePlay`, default: flagged). */
 async function latePolicy(): Promise<LatePolicy> {
   try {
@@ -66,9 +73,10 @@ async function isMod(username: string | undefined): Promise<boolean> {
   } catch { return false; }
 }
 
-async function dayState(date: string, username: string | undefined) {
-  const faction = await factionFor(date);
-  const { par } = dailyScenario(date, faction);
+async function dayState(date: string, username: string | undefined, fresh: AchId[] = []) {
+  const demo = date === DEMO_KEY;
+  const faction = demo ? DEMO_FACTION : await factionFor(date);
+  const { par } = dailyScenario(demo ? DEMO_DATE : date, faction);
   const [lb, votes, me, myVote, streak] = await Promise.all([
     leaderboard(date, username),
     getVotes(date),
@@ -79,11 +87,16 @@ async function dayState(date: string, username: string | undefined) {
   const [mod, rivals, policy] = await Promise.all([isMod(username), username ? rivalsFor(date, username) : Promise.resolve([]), latePolicy()]);
   const today = dateKey();
   // a late play kept off the board (policy "ontime"): where it would have placed
-  const offBoard = me && !lb.me ? await wouldRank(date, me.total) : null;
+  const offBoard = me && !lb.me && !demo ? await wouldRank(date, me.total) : null;
   const tutorial = username ? await tutorialDone(username) : false;
   const practice = username ? await getPractice(date, username) : null;
-  return { date, faction, par, username: username ?? null, leaderboard: lb, votes, me, myVote, streak, today, isMod: mod, rivals,
-    policy, late: date < today, offBoard, tutorialDone: tutorial, tutorialStats: mod ? await tutorialStats() : null, practice };
+  const achievements = username ? await getAchievements(username, demo ? today : date, fresh) : null;
+  const avatars = await avatarsFor([...lb.board.map((r) => r.username), ...rivals.map((r) => r.username), ...(username ? [username] : [])]).catch((): Record<string, string> => ({}));
+  const skirmish = username ? { unlocked: await skirmishUnlocked(username, dateKey(), demo), records: await skirmishRecords(username) } : null;
+  // an older day's post links to today's (and creates it if the scheduled job failed)
+  const todayPost = demo || date < today ? await ensureTodayPost(today).catch(() => null) : null;
+  return { date: demo ? DEMO_DATE : date, demo, faction, par, username: username ?? null, leaderboard: lb, votes, me, myVote, streak, today, isMod: mod, rivals,
+    policy, late: !demo && date < today, todayPost, offBoard, tutorialDone: tutorial, tutorialStats: mod ? await tutorialStats() : null, practice, achievements, skirmish, avatars };
 }
 
 function asTrpc(e: unknown): never {
@@ -96,7 +109,7 @@ export const appRouter = t.router({
     /** Everything the splash and the game need for this post's day. */
     init: publicProcedure.query(async () => {
       const username = await reddit.getCurrentUsername();
-      return dayState(await postDate(), username);
+      return dayState(await postKey(), username);
     }),
 
     /** Submit a finished game (its action log). The server replays it to compute the score. */
@@ -105,16 +118,21 @@ export const appRouter = t.router({
       .mutation(async ({ input }) => {
         const username = await reddit.getCurrentUsername();
         if (!username) throw new TRPCError({ code: 'UNAUTHORIZED', message: 'Log in to save your score' });
+        if (isDemo()) {
+          let r;
+          try { r = await submitDemo(username, input.actions); } catch (e) { asTrpc(e); }
+          return dayState(DEMO_KEY, username, r.fresh);
+        }
         const date = await postDate();
         let res;
         try { res = await submitResult(date, username, input.actions, { today: dateKey(), policy: await latePolicy() }); } catch (e) { asTrpc(e); }
         if (res.fresh && context.subredditName) {
           // flair is cosmetic: never fail the submission because of it
           try {
-            await reddit.setUserFlair({ subredditName: context.subredditName, username, text: flairFor(res.streak) });
+            await reddit.setUserFlair({ subredditName: context.subredditName, username, text: (await flairInputs(username).then((f) => flairFor(res.streak, f.runs, f.honours)).catch(() => flairFor(res.streak))) });
           } catch (e) { console.warn(`flair failed: ${e}`); }
         }
-        return dayState(date, username);
+        return dayState(date, username, res.fresh ? res.achievements ?? [] : []);
       }),
 
     vote: publicProcedure
@@ -122,6 +140,10 @@ export const appRouter = t.router({
       .mutation(async ({ input }) => {
         const username = await reddit.getCurrentUsername();
         if (!username) throw new TRPCError({ code: 'UNAUTHORIZED', message: 'Log in to vote' });
+        if (isDemo()) {
+          try { await castDemoVote(username, input.faction); } catch (e) { asTrpc(e); }
+          return dayState(DEMO_KEY, username);
+        }
         const date = await postDate();
         try { await castVote(date, username, input.faction, dateKey()); } catch (e) { asTrpc(e); }
         return dayState(date, username);
@@ -133,18 +155,40 @@ export const appRouter = t.router({
       .mutation(async ({ input }) => {
         const username = await reddit.getCurrentUsername();
         if (!username) throw new TRPCError({ code: 'UNAUTHORIZED', message: 'Log in to keep your practice runs' });
+        if (isDemo()) throw new TRPCError({ code: 'BAD_REQUEST', message: 'Every Demo run is scored: there is no practice here' });
         const date = await postDate();
-        try { await submitPractice(date, username, input.actions, dateKey()); } catch (e) { asTrpc(e); }
-        return dayState(date, username);
+        let fresh: AchId[] = [];
+        try { fresh = (await submitPractice(date, username, input.actions, dateKey())).fresh; } catch (e) { asTrpc(e); }
+        return dayState(date, username, fresh);
+      }),
+
+    /** Record a finished Skirmish (pool map): unranked, personal best per map. */
+    skirmish: publicProcedure
+      .input(z.object({ id: z.number().int().min(1).max(10000), actions: z.array(ActionSchema).max(400) }))
+      .mutation(async ({ input }) => {
+        const username = await reddit.getCurrentUsername();
+        if (!username) throw new TRPCError({ code: 'UNAUTHORIZED', message: 'Log in to keep your skirmish scores' });
+        try { await submitSkirmish(username, input.id, input.actions, dateKey(), isDemo()); } catch (e) { asTrpc(e); }
+        return { unlocked: true, records: await skirmishRecords(username) };
       }),
 
     /** A followed rival's moves for this post's day, once the player has finished it. */
+    /** A client error from a player's device (window error / unhandled rejection): kept, last 200, for the status menu. */
+    clientError: publicProcedure
+      .input(z.object({ msg: z.string().max(300), where: z.string().max(300), build: z.string().max(60) }))
+      .mutation(async ({ input }) => {
+        const now = Date.now();
+        await redis.zAdd('errors', { member: JSON.stringify({ ...input, at: new Date(now).toISOString(), post: context.postId ?? '' }), score: now });
+        await redis.zRemRangeByRank('errors', 0, -201);
+        return true;
+      }),
+
     rivalPlan: publicProcedure
       .input(z.object({ username: z.string().min(1).max(30) }))
       .query(async ({ input }) => {
         const username = await reddit.getCurrentUsername();
         if (!username) throw new TRPCError({ code: 'UNAUTHORIZED', message: 'Log in to compare' });
-        const date = await postDate();
+        const date = await postKey();
         try { return { actions: await rivalPlan(date, username, input.username) }; } catch (e) { asTrpc(e); }
       }),
 
@@ -154,14 +198,15 @@ export const appRouter = t.router({
       .mutation(async ({ input }) => {
         const username = await reddit.getCurrentUsername();
         if (!username || !context.postId) throw new TRPCError({ code: 'UNAUTHORIZED', message: 'Log in to share' });
-        const date = await postDate();
+        const date = await postKey();
         const st = await dayState(date, username);
         if (!st.me) throw new TRPCError({ code: 'BAD_REQUEST', message: 'Finish the campaign first' });
         let mentions: string[] = [];
         try { mentions = await checkShare(date, username, input.mentions); } catch (e) { asTrpc(e); }
-        const text = shareText(date, st.me, st.par, st.streak?.streak ?? 0, st.leaderboard.me?.rank ?? null, st.leaderboard.players)
-          + challengeLine(mentions);
+        const text = shareText(date === DEMO_KEY ? 'Demo' : date, st.me, st.par, st.streak?.streak ?? 0, st.leaderboard.me?.rank ?? null, st.leaderboard.players, username)
+          + challengeLine(mentions, username);
         await reddit.submitComment({ id: context.postId, text, runAs: 'USER' });
+        await awardFor(username, 'acta', date, `Shared your result in the comments of ${prettyDate(date)}.`);
         return { ok: true };
       }),
 
@@ -174,7 +219,7 @@ export const appRouter = t.router({
           if (input.follow) await followRival(username, input.username);
           else await unfollowRival(username, input.username);
         } catch (e) { asTrpc(e); }
-        return dayState(await postDate(), username);
+        return dayState(await postKey(), username);
       }),
 
     /** Moderator debug: wipe my game for this post's day, or the whole day. */
@@ -183,7 +228,7 @@ export const appRouter = t.router({
       .mutation(async ({ input }) => {
         const username = await reddit.getCurrentUsername();
         if (!(await isMod(username))) throw new TRPCError({ code: 'FORBIDDEN', message: 'Moderators only' });
-        const date = await postDate();
+        const date = await postKey();
         if (input.scope === 'me') await resetPlayer(date, username!);
         else await resetDay(date);
         return dayState(date, username);

@@ -46,7 +46,8 @@ export type EventEffect =
   | { type: 'gambit'; parts: GambitPart[] };
 
 /** One consequence of an accepted gambit. `icon` picks the map art (an event kind); `text` is the forecast line. */
-export interface GambitPart { delay: number; effect: EventEffect; icon: string; text: string }
+/** `now`: paid the moment the offer is accepted (purse only), instead of at the end of turn + delay. */
+export interface GambitPart { delay: number; effect: EventEffect; icon: string; text: string; now?: boolean }
 
 /** `hub`: every road of your most-connected town (ignores the tribe). */
 export type CutMode = 'all' | 'deepest' | 'cheapest' | 'hub';

@@ -7,6 +7,8 @@
 // and props never cover a road or a town. Art randomness uses its own stream (seed + "/art"),
 // so it never affects the game. Coordinates are computed in the original orientation and
 // mapped to the screen orientation only when drawn, so rotating the phone keeps the same board.
+import { duststorm, swirl, gust, ankh, nubian, goldPeak, goldMini } from './board-egypt';
+import { EGYPT_BASE, palm, papyrus, ripple, dune, bigDune, mesa, pebbles, bones, skiff, sphinx, obelisk, settlementEgypt, castraEgypt } from './board-egypt';
 import { Rng, buildLand, clipPoly, dist, distSeg, inside, LAND_K } from '../../shared/engine';
 import type { Land, Pt, Scenario } from '../../shared/engine';
 
@@ -19,6 +21,11 @@ export const CREAM = '#f3e6c4';
 /** Half-width of the seam between tiles, and the width of a tribe's border band (art pixels). */
 const SEAM = 2.5, BAND = 8.7;
 export const TRIBE_ART = ['#f0b81c', '#2f86e0', '#a24fd6', '#e8e8e8'];
+/** Board skin: Gaul (the daily) or Aegyptus (board-egypt.ts). Art only: tiles, towns, boats; never the rules. */
+export type BoardTheme = 'gaul' | 'egypt';
+let THEME: BoardTheme = 'gaul';
+export const setBoardTheme = (t: BoardTheme) => { THEME = t; };
+export const boardTheme = () => THEME;
 const f = (n: number) => n.toFixed(1);
 
 // ---------------------------------------------------------------- geometry (shared with the rules: engine/land.ts)
@@ -114,7 +121,8 @@ export function buildBoard(sc: Scenario, rotated: boolean): Board {
     return g;
   }
 
-  const BASE: Record<Land, string> = { plain: '#b6c45a', forest: '#8fb04c', hills: '#c9a25e', roman: '#d9c48c', mountain: '#8f897d', sea: '#245a78', lake: '#6fb2c4', wildwood: '#2c5a30' };
+  const EG = THEME === 'egypt';
+  const BASE: Record<Land, string> = EG ? { ...EGYPT_BASE } : { plain: '#b6c45a', forest: '#8fb04c', hills: '#c9a25e', roman: '#d9c48c', mountain: '#8f897d', sea: '#245a78', lake: '#6fb2c4', wildwood: '#2c5a30' };
   const id = sc.seed.replace(/[^a-z0-9]/gi, '') + (rotated ? 'r' : 'u');
   let defs = '', sea = '', ground = '', shadows = '', tiles = '', tex = '', rims = '', borders = '', marks = '';
   const tileOut: Pt[][] = [];
@@ -125,7 +133,7 @@ export function buildBoard(sc: Scenario, rotated: boolean): Board {
       sea += `<path d="${polyD(view)}" fill="${BASE.sea}" stroke="${BASE.sea}" stroke-width="2"/>`;
       let g = scatter(cell, 22, 6, (p) => curl(p.x, p.y, r(0.9, 1.3)), 40);
       const c = mp(centroid(cell));
-      if (rng.next() < 0.65) g += trireme(c.x, c.y, c.x > (rotated ? H : W) / 2);
+      if (rng.next() < 0.65) g += EG ? skiff(c.x, c.y, c.x > (rotated ? H : W) / 2) : trireme(c.x, c.y, c.x > (rotated ? H : W) / 2);
       defs += `<clipPath id="s${id}${i}"><path d="${polyD(view)}"/></clipPath>`;
       tex += `<g clip-path="url(#s${id}${i})">${g}</g>`;
       return;
@@ -142,7 +150,30 @@ export function buildBoard(sc: Scenario, rotated: boolean): Board {
     tiles += `<path d="${polyD(tv)}" fill="${BASE[L]}" stroke="${O}" stroke-width="2.2" stroke-linejoin="round"/>`;
     let g = '';
     const c = mp(centroid(t));
-    if (L === 'roman') {
+    if (EG) {
+      // Aegyptus: the irrigated valley, flat and rocky desert, the deep desert, oases, a necropolis
+      if (L === 'roman') {
+        const home = mp(T[i]!);
+        g += stripes(home, ['#c9c27a', '#b4bb62', '#dccb8a'], 16, 16, '#a08a52', 0);
+        g += scatter(t, 22, 8, (p) => palm(p.x, p.y, r(0.75, 0.9), rng.next() < 0.5 ? 1 : -1), 8);
+      } else if (L === 'plain') {
+        // the valley: strips of green field and sandy fallow between irrigation channels, a few palms
+        g += stripes(c, ['#a9bb58', '#d6c27c', '#9fb452', '#cdb871', '#e0cc8a'], 10, 20, '#5a9fc0');
+        g += scatter(t, 28, 9, (p) => palm(p.x, p.y, r(0.8, 1.05), rng.next() < 0.5 ? 1 : -1), 5);
+      } else if (L === 'forest') {
+        g += scatter(t, 13, 4, (p) => ripple(p.x, p.y, r(0.8, 1.2)), 80) + scatter(t, 16, 6, (p) => pebbles(p.x, p.y), 12) + scatter(t, 34, 10, (p) => dune(p.x, p.y, r(0.7, 0.9)), 3);
+      } else if (L === 'hills') {
+        g += scatter(t, 11, 4, (p) => pebbles(p.x, p.y), 60) + scatter(t, 22, 8, (p) => mesa(p.x, p.y, r(0.85, 1.15)), 40);
+      } else if (L === 'mountain') {
+        // the deep desert: a bright sea of high dunes, impassable
+        g += scatter(t, 11, 4, (p) => ripple(p.x, p.y, 1.1).replace('#c49a4a', '#d29a2e'), 60) + scatter(t, 19, 8, (p) => bigDune(p.x, p.y, r(1.1, 1.6)), 40) + bones(c.x, c.y + 6);
+      } else if (L === 'lake') {
+        g += scatter(t, 20, 9, (p) => curl(p.x, p.y, 0.8, '#e6f4f7'), 16) + scatter(t, 13, 3, (p) => papyrus(p.x, p.y), 24, (p) => !inside(t, p, 14));
+        g += scatter(t, 16, 2, (p) => palm(p.x, p.y, r(0.8, 1), rng.next() < 0.5 ? 1 : -1), 10, (p) => !inside(t, p, 10)) + skiff(c.x, c.y, false, false);
+      } else if (L === 'wildwood') {
+        g += sphinx(c.x - 10, c.y + 12, 1.5) + obelisk(c.x + 28, c.y + 4, 1.35) + scatter(t, 12, 4, (p) => ripple(p.x, p.y), 60, (p) => dist(mp(p), c) > 34);
+      }
+    } else if (L === 'roman') {
       const home = mp(T[i]!);
       g += stripes(home, ['#e3d29b', '#cdb877', '#d8c88f'], 16, 16, '#9c8a5a', 0) + stripes(home, ['#00000000'], 16, 16, '#9c8a5a', Math.PI / 2);
       g += scatter(t, 15, 8, (p) => vine(p.x, p.y), 18);
@@ -242,7 +273,7 @@ export function buildBoard(sc: Scenario, rotated: boolean): Board {
       const posts = [P(30, -5), P(30, 5), P(14, -5), P(14, 5)].map((o) => `<circle cx="${f(o.x)}" cy="${f(o.y)}" r="1.8" fill="#3b2a1a"/>`).join('');
       const boat = P(22, 15);
       shoreArt += `<path d="${polyD(quad)}" fill="#9a6a3a" stroke="${O}" stroke-width="1.2"/><path d="${planks}" stroke="#5a3a1a" stroke-width=".8"/>${posts}` +
-        `<g transform="translate(${f(boat.x)},${f(boat.y)}) scale(.55)"><path d="M-14,0 Q-12,6 -4,6 L10,6 Q15,5 17,-1 Z" fill="#7a4a24" stroke="${O}" stroke-width="1.6"/><line x1="0" y1="2" x2="0" y2="-14" stroke="${O}" stroke-width="1.6"/><path d="M-1,-13 L-9,-2 H-1 Z" fill="#efe2c2" stroke="${O}" stroke-width="1"/></g>`;
+        (EG ? `<g transform="translate(${f(boat.x)},${f(boat.y)}) scale(.6)">${skiff(0, 0)}</g>` : `<g transform="translate(${f(boat.x)},${f(boat.y)}) scale(.55)"><path d="M-14,0 Q-12,6 -4,6 L10,6 Q15,5 17,-1 Z" fill="#7a4a24" stroke="${O}" stroke-width="1.6"/><line x1="0" y1="2" x2="0" y2="-14" stroke="${O}" stroke-width="1.6"/><path d="M-1,-13 L-9,-2 H-1 Z" fill="#efe2c2" stroke="${O}" stroke-width="1"/></g>`);
     }
     if (front && dist(front[0], front[1]) > 24) {
       const { m, nx, ny } = out(front);
@@ -297,6 +328,7 @@ export const settlementSize = (v: number) => ({ top: [0, 22, 24, 30, 36][Math.ma
 
 /** Settlement by tier (★1–4) and flavour: Gallic until Rome holds it, Roman after. */
 export function settlement(v: number, roman: boolean, tribe: string): string {
+  if (THEME === 'egypt') return settlementEgypt(v, roman, tribe);
   v = Math.max(1, Math.min(4, v));
   const P = [[0, 0], [20, 9], [24, 10], [28, 12], [34, 14]][v]!;
   let g = plinth(P[0]!, P[1]!, tribe, roman);
@@ -316,6 +348,7 @@ export function settlement(v: number, roman: boolean, tribe: string): string {
 
 /** The castra: a square Roman camp. */
 export function castraIcon(): string {
+  if (THEME === 'egypt') return castraEgypt();
   let g = `<ellipse cx="1" cy="20" rx="27" ry="7" fill="#000" opacity=".3"/><rect x="-24" y="-18" width="48" height="36" rx="4" fill="#d8cba4" stroke="${O}" stroke-width="2"/>`;
   g += `<rect x="-24" y="-18" width="48" height="36" rx="4" fill="none" stroke="#8a5a2c" stroke-width="4" stroke-dasharray="3 1.4"/><path d="M0,-18 V18 M-24,0 H24" stroke="#b8a77a" stroke-width="3"/>`;
   for (const [x, y] of [[-12, -9], [12, -9], [-12, 9], [12, 9]]) g += `<path d="M${x! - 6},${y! + 4} L${x},${y! - 6} L${x! + 6},${y! + 4} Z" fill="#c4552d" stroke="${O}" stroke-width="1"/><path d="M${x},${y! - 6} L${x! + 6},${y! + 4} L${x! + 1},${y! + 4} Z" fill="#9c3d1e"/>`;
@@ -329,15 +362,15 @@ export const pitchfork = (x: number, y: number, rot: number) => `<g transform="t
 export const swords = (x: number, y: number, k = 1) => `<g transform="translate(${f(x)},${f(y)}) scale(${k})"><circle r="15" fill="#7a1f16" stroke="${O}" stroke-width="1.6"/>${[45, -45].map((a) => `<g transform="rotate(${a})"><path d="M-1.6,-12 L0,-14 L1.6,-12 L1.6,5 L-1.6,5 Z" fill="#e6e6ea" stroke="${O}" stroke-width=".9"/><rect x="-5" y="5" width="10" height="2.2" fill="#c9a227" stroke="${O}" stroke-width=".7"/><rect x="-1.2" y="7.2" width="2.4" height="5" fill="#6a4423" stroke="${O}" stroke-width=".6"/></g>`).join('')}</g>`;
 export const sheaf = (x: number, y: number, k = 1) => `<g transform="translate(${f(x)},${f(y)}) scale(${k})"><ellipse cy="9" rx="7" ry="2" fill="#000" opacity=".2"/>${[-4, -2, 0, 2, 4].map((dx) => `<path d="M${dx * 0.4},9 L${dx},-6" stroke="#a07a1c" stroke-width="1.3"/><ellipse cx="${dx}" cy="-8" rx="1.7" ry="4" fill="#f0c23a" stroke="${O}" stroke-width=".7"/>`).join('')}<path d="M-4,2 H4" stroke="#7a4a24" stroke-width="2"/></g>`;
 export const coins = (x: number, y: number, k = 1) => `<g transform="translate(${f(x)},${f(y)}) scale(${k})">${[[-6, 3], [6, 3], [0, -4]].map(([cx, cy]) => `<circle cx="${cx}" cy="${cy! + 1.5}" r="6" fill="#a6740f" stroke="${O}" stroke-width="1"/><circle cx="${cx}" cy="${cy}" r="6" fill="#f2c230" stroke="${O}" stroke-width="1.1"/><text x="${cx}" y="${cy! + 2.6}" text-anchor="middle" font-size="7" font-weight="bold" fill="#8a5a0c" font-family="Georgia,serif">D</text>`).join('')}</g>`;
-export const silverPeak = (x: number, y: number) => `<g transform="translate(${f(x)},${f(y)})"><ellipse cx="2" cy="11" rx="17" ry="3.4" fill="#000" opacity=".25"/><path d="M-17,11 L-2,-17 L4,-7 L8,-12 L18,11 Z" fill="#9b958a" stroke="${O}" stroke-width="1.5" stroke-linejoin="round"/><path d="M-8,6 L-3,-4 L1,2 L5,-6 M-11,10 L-5,2" stroke="#e8f0ff" stroke-width="2.2" fill="none" stroke-linecap="round"/><path d="M12,-14 l1.6,4 4,1.6 -4,1.6 -1.6,4 -1.6,-4 -4,-1.6 4,-1.6 Z" fill="#fff" stroke="#6d7290" stroke-width=".8"/><path d="M-2,8 h6 v3 h-6 Z" fill="${O}"/></g>`;
-export const cloud = (x: number, y: number) => `<g transform="translate(${f(x)},${f(y)})"><path d="M-14,4 Q-16,-4 -8,-5 Q-6,-13 3,-10 Q10,-14 13,-6 Q19,-5 17,3 Z" fill="#c9d3dc" stroke="${O}" stroke-width="1.3" stroke-linejoin="round"/><path d="M-8,8 l-2,5 M-1,8 l-2,5 M6,8 l-2,5" stroke="#2f6f9f" stroke-width="1.6" stroke-linecap="round"/></g>`;
-export const drop = (x: number, y: number) => `<path d="M${x},${y - 7} C${x + 6},${y} ${x + 5},${y + 6} ${x},${y + 6} C${x - 5},${y + 6} ${x - 6},${y} ${x},${y - 7} Z" fill="#5fb0e0" stroke="${O}" stroke-width="1.1"/>`;
-export const silverMini = (x: number, y: number) => `<path d="M${x - 6},${y + 5} L${x},${y - 6} L${x + 6},${y + 5} Z" fill="#9b958a" stroke="${O}" stroke-width="1"/><path d="M${x - 3},${y + 2} L${x},${y - 3} L${x + 2},${y}" stroke="#eef3ff" stroke-width="1.6" fill="none"/>`;
+const silverPeakG = (x: number, y: number) => `<g transform="translate(${f(x)},${f(y)})"><ellipse cx="2" cy="11" rx="17" ry="3.4" fill="#000" opacity=".25"/><path d="M-17,11 L-2,-17 L4,-7 L8,-12 L18,11 Z" fill="#9b958a" stroke="${O}" stroke-width="1.5" stroke-linejoin="round"/><path d="M-8,6 L-3,-4 L1,2 L5,-6 M-11,10 L-5,2" stroke="#e8f0ff" stroke-width="2.2" fill="none" stroke-linecap="round"/><path d="M12,-14 l1.6,4 4,1.6 -4,1.6 -1.6,4 -1.6,-4 -4,-1.6 4,-1.6 Z" fill="#fff" stroke="#6d7290" stroke-width=".8"/><path d="M-2,8 h6 v3 h-6 Z" fill="${O}"/></g>`;
+const cloudG = (x: number, y: number) => `<g transform="translate(${f(x)},${f(y)})"><path d="M-14,4 Q-16,-4 -8,-5 Q-6,-13 3,-10 Q10,-14 13,-6 Q19,-5 17,3 Z" fill="#c9d3dc" stroke="${O}" stroke-width="1.3" stroke-linejoin="round"/><path d="M-8,8 l-2,5 M-1,8 l-2,5 M6,8 l-2,5" stroke="#2f6f9f" stroke-width="1.6" stroke-linecap="round"/></g>`;
+const dropG = (x: number, y: number) => `<path d="M${x},${y - 7} C${x + 6},${y} ${x + 5},${y + 6} ${x},${y + 6} C${x - 5},${y + 6} ${x - 6},${y} ${x},${y - 7} Z" fill="#5fb0e0" stroke="${O}" stroke-width="1.1"/>`;
+const silverMiniG = (x: number, y: number) => `<path d="M${x - 6},${y + 5} L${x},${y - 6} L${x + 6},${y + 5} Z" fill="#9b958a" stroke="${O}" stroke-width="1"/><path d="M${x - 3},${y + 2} L${x},${y - 3} L${x + 2},${y}" stroke="#eef3ff" stroke-width="1.6" fill="none"/>`;
 // ---- art for the 2026-11-15 events (large props on tiles, and small icons below)
 export const dagger = (x: number, y: number, k = 1) => `<g transform="translate(${f(x)},${f(y)}) scale(${k})"><circle r="15" fill="#3d3326" stroke="${O}" stroke-width="1.6"/><g transform="rotate(35)"><path d="M-1.8,-12 L0,-14.5 L1.8,-12 L1.6,4 L-1.6,4 Z" fill="#d9d9de" stroke="${O}" stroke-width=".9"/><rect x="-5.5" y="4" width="11" height="2.2" fill="#8a6a3a" stroke="${O}" stroke-width=".7"/><rect x="-1.3" y="6.2" width="2.6" height="5.5" fill="#4a3018" stroke="${O}" stroke-width=".6"/></g><path d="M-9,-3 q4,-4 8,0 M1,-3 q4,-4 8,0" stroke="#000" stroke-width="2.4" fill="none" opacity=".55"/></g>`;
-export const sickle = (x: number, y: number, k = 1) => `<g transform="translate(${f(x)},${f(y)}) scale(${k})"><path d="M-9,4 C-10,-7 0,-12 8,-8 C1,-8 -5,-4 -4,4 Z" fill="#f0c23a" stroke="${O}" stroke-width="1.1" stroke-linejoin="round"/><path d="M-9,4 L-6,10" stroke="#6a4423" stroke-width="2.6" stroke-linecap="round"/><path d="M-9,4 L-6,10" stroke="${O}" stroke-width=".6" stroke-linecap="round" opacity=".5"/><circle cx="5" cy="4" r="2" fill="#eef5e0" stroke="#5d7a2a" stroke-width=".8"/><circle cx="8.5" cy="1.5" r="1.7" fill="#eef5e0" stroke="#5d7a2a" stroke-width=".8"/><circle cx="7.5" cy="6.5" r="1.5" fill="#eef5e0" stroke="#5d7a2a" stroke-width=".8"/></g>`;
+const sickleG = (x: number, y: number, k = 1) => `<g transform="translate(${f(x)},${f(y)}) scale(${k})"><path d="M-9,4 C-10,-7 0,-12 8,-8 C1,-8 -5,-4 -4,4 Z" fill="#f0c23a" stroke="${O}" stroke-width="1.1" stroke-linejoin="round"/><path d="M-9,4 L-6,10" stroke="#6a4423" stroke-width="2.6" stroke-linecap="round"/><path d="M-9,4 L-6,10" stroke="${O}" stroke-width=".6" stroke-linecap="round" opacity=".5"/><circle cx="5" cy="4" r="2" fill="#eef5e0" stroke="#5d7a2a" stroke-width=".8"/><circle cx="8.5" cy="1.5" r="1.7" fill="#eef5e0" stroke="#5d7a2a" stroke-width=".8"/><circle cx="7.5" cy="6.5" r="1.5" fill="#eef5e0" stroke="#5d7a2a" stroke-width=".8"/></g>`;
 export const bowl = (x: number, y: number, k = 1) => `<g transform="translate(${f(x)},${f(y)}) scale(${k})"><path d="M-9,-1 H9 Q8,8 0,8 Q-8,8 -9,-1 Z" fill="#a8743a" stroke="${O}" stroke-width="1.1" stroke-linejoin="round"/><path d="M-2,-1 L0,3 L-1,6" stroke="${O}" stroke-width="1" fill="none"/><path d="M-3,-5 q1.5,-2 0,-4 M3,-5 q1.5,-2 0,-4" stroke="#8a7a66" stroke-width="1" fill="none"/></g>`;
-export const snowflake = (x: number, y: number, k = 1) => `<g transform="translate(${f(x)},${f(y)}) scale(${k})" stroke-linecap="round">${[0, 60, 120].map((a) => `<g transform="rotate(${a})"><line x1="0" y1="-8" x2="0" y2="8" stroke="${O}" stroke-width="3.2"/><line x1="0" y1="-8" x2="0" y2="8" stroke="#fff" stroke-width="1.6"/></g>`).join('')}<circle r="1.8" fill="#bfe0f5" stroke="${O}" stroke-width=".7"/></g>`;
+const snowflakeG = (x: number, y: number, k = 1) => `<g transform="translate(${f(x)},${f(y)}) scale(${k})" stroke-linecap="round">${[0, 60, 120].map((a) => `<g transform="rotate(${a})"><line x1="0" y1="-8" x2="0" y2="8" stroke="${O}" stroke-width="3.2"/><line x1="0" y1="-8" x2="0" y2="8" stroke="#fff" stroke-width="1.6"/></g>`).join('')}<circle r="1.8" fill="#bfe0f5" stroke="${O}" stroke-width=".7"/></g>`;
 export const amphora = (x: number, y: number, k = 1) => `<g transform="translate(${f(x)},${f(y)}) scale(${k})"><path d="M-2.5,-9 H2.5 V-6 Q7,-3 6,3 Q5,8 0,10 Q-5,8 -6,3 Q-7,-3 -2.5,-6 Z" fill="#c4683a" stroke="${O}" stroke-width="1.1" stroke-linejoin="round"/><path d="M-2.5,-7 Q-6,-7 -5,-3 M2.5,-7 Q6,-7 5,-3" stroke="${O}" stroke-width="1" fill="none"/><path d="M-5,1 H5" stroke="#f2d6a8" stroke-width="1.2"/></g>`;
 export const purse = (x: number, y: number, k = 1) => `<g transform="translate(${f(x)},${f(y)}) scale(${k})"><path d="M-3,-6 Q-9,-2 -8,4 Q-7,9 0,9 Q7,9 8,4 Q9,-2 3,-6 Z" fill="#b08850" stroke="${O}" stroke-width="1.1" stroke-linejoin="round"/><path d="M-4,-7 Q0,-4 4,-7" stroke="#6a4423" stroke-width="1.6" fill="none"/><circle cx="0" cy="3" r="3.2" fill="#f2c230" stroke="${O}" stroke-width=".8"/></g>`;
 export const olive = (x: number, y: number, k = 1) => `<g transform="translate(${f(x)},${f(y)}) scale(${k})"><path d="M-9,8 Q0,2 8,-9" stroke="#5a4a24" stroke-width="1.4" fill="none"/>${[[-5, 4, -30], [-1, 1, 40], [2, -2, -35], [5, -5, 35], [7, -8, -20]].map(([lx, ly, a]) => `<ellipse cx="${lx}" cy="${ly}" rx="3.6" ry="1.5" transform="rotate(${a} ${lx} ${ly})" fill="#7fa04a" stroke="${O}" stroke-width=".6"/>`).join('')}<circle cx="-3" cy="6" r="1.4" fill="#3b3a5a"/></g>`;
@@ -345,9 +378,18 @@ export const stakes = (x: number, y: number, k = 1) => `<g transform="translate(
 
 export const scales = (x: number, y: number, k = 1) => `<g transform="translate(${f(x)},${f(y)}) scale(${k})" fill="none" stroke="${O}" stroke-linecap="round"><line x1="0" y1="-11" x2="0" y2="9" stroke-width="1.6"/><line x1="-9" y1="-7" x2="9" y2="-7" stroke-width="1.6"/><path d="M-9,-7 L-12,1 H-6 Z M9,-7 L6,1 H12 Z" fill="#e0a52a" stroke-width="1"/><path d="M-5,9 H5" stroke-width="2.2"/></g>`;
 export const pirateShip = (x: number, y: number, k = 1) => `<g transform="translate(${f(x)},${f(y)}) scale(${k})"><path d="M-12,3 H12 L8,9 H-8 Z" fill="#4a2e1a" stroke="${O}" stroke-width="1.1" stroke-linejoin="round"/><line x1="0" y1="3" x2="0" y2="-12" stroke="${O}" stroke-width="1.4"/><path d="M0,-11 L-9,-1 H0 Z" fill="#1f1f24" stroke="${O}" stroke-width=".8"/><path d="M0,-11 L8,-3 H0 Z" fill="#2a2a30" stroke="${O}" stroke-width=".8"/><circle cx="-3.5" cy="-4" r="1.4" fill="#e8e2d0"/></g>`;
-export const warband = (x: number, y: number, k = 1) => `<g transform="translate(${f(x)},${f(y)}) scale(${k})"><line x1="-9" y1="10" x2="7" y2="-11" stroke="#6a4423" stroke-width="2"/><path d="M7,-11 L11,-15 L9,-9 Z" fill="#c9c9cf" stroke="${O}" stroke-width=".8"/><circle cx="-1" cy="3" r="7.5" fill="#7a3b1e" stroke="${O}" stroke-width="1.2"/><circle cx="-1" cy="3" r="2.2" fill="#c9a227" stroke="${O}" stroke-width=".7"/><path d="M-1,-4.5 V10.5 M-8.5,3 H6.5" stroke="#5a2a14" stroke-width="1"/></g>`;
+const warbandG = (x: number, y: number, k = 1) => `<g transform="translate(${f(x)},${f(y)}) scale(${k})"><line x1="-9" y1="10" x2="7" y2="-11" stroke="#6a4423" stroke-width="2"/><path d="M7,-11 L11,-15 L9,-9 Z" fill="#c9c9cf" stroke="${O}" stroke-width=".8"/><circle cx="-1" cy="3" r="7.5" fill="#7a3b1e" stroke="${O}" stroke-width="1.2"/><circle cx="-1" cy="3" r="2.2" fill="#c9a227" stroke="${O}" stroke-width=".7"/><path d="M-1,-4.5 V10.5 M-8.5,3 H6.5" stroke="#5a2a14" stroke-width="1"/></g>`;
 
 /** Small icons for the row under a town's stars, keyed by event kind (or effect kind). */
+// event art that changes with the skin (Gaul / Aegyptus): same events, different pictures
+const EGT = () => THEME === 'egypt';
+export const cloud = (x: number, y: number) => (EGT() ? duststorm(x, y) : cloudG(x, y));
+export const drop = (x: number, y: number) => (EGT() ? swirl(x, y) : dropG(x, y));
+export const snowflake = (x: number, y: number, k = 1) => (EGT() ? gust(x, y, k) : snowflakeG(x, y, k));
+export const sickle = (x: number, y: number, k = 1) => (EGT() ? ankh(x, y, k) : sickleG(x, y, k));
+export const warband = (x: number, y: number, k = 1) => (EGT() ? nubian(x, y, k) : warbandG(x, y, k));
+export const silverPeak = (x: number, y: number) => (EGT() ? goldPeak(x, y) : silverPeakG(x, y));
+export const silverMini = (x: number, y: number) => (EGT() ? goldMini(x, y) : silverMiniG(x, y));
 export const MINI: Record<string, (x: number, y: number) => string> = {
   revolt: (x, y) => `<g transform="translate(${x},${y}) scale(.55)">${pitchfork(-4, 0, -15)}${flame(6, 3, 0.9)}</g>`,
   raid: (x, y) => swords(x, y, 0.5),

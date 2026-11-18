@@ -69,6 +69,10 @@ There are 21 event types, introduced over the season. Besides threats (revolts, 
 
 - **Rivals.** Follow other players to compare scores every day, and replay a rival's campaign turn by turn against yours. Caesar's plan is never shown, because it would be the day's answer.
 - **Practice and personal best.** Replay the day as often as you like. Practice never changes your rank, but every attempt is kept, and your personal best is shown to you and your rivals.
+- **Skirmish.** After today's campaign, fight extra maps from a pool of pre-validated battlefields, each with Caesar's score: 300 in Gaul and 300 in Egypt (Aegyptus: Egyptian names, events and art on the same rules). Unranked; challenge a friend on the same map number.
+- **The Demo.** A moderator menu item (*Post the Demo*) creates one *All Roads Lead to Rome · Demo* post: a frozen, published map (16 November 2026, Caesar 303) played as often as you like. Every run is scored, your best goes on the Demo's own board, and it never touches streaks or the daily board. First-timers start in the guided tutorial (skippable); after each run come the score chart, every run against Caesar's line, honours, the Senate's ballot (tallied on the Demo only), rivals, sharing and Skirmish.
+- **Achievements.** Twenty honours in copper, silver and gold, from *Hastatus* (first campaign) to *Centurio* (100), *Pontifex Maximus* (7-day streak) and *Crossing the Rubicon* (beat Caesar). Each keeps the date it was won, with your completion percentage and how rare each one is.
+- **Reddit-native.** Devvit Journeys (a journey per campaign, progress per turn, the result at dusk), snoovatars on the leaderboard and rivals, the app's daily *Senate's verdict* comment (podium, Caesar, the vote) and a decree comment on each new post, user flair with rank, streak and honours, and a game badge pointing to today's campaign.
 - **Streaks, flair, and a share comment** (as you, never as the app). The app sends no DMs.
 
 ---

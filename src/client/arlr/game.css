@@ -1,6 +1,6 @@
 /* Game view styles (ported from the playtest prototype). */
 
-  :root { --ink:#2b2115; --paper:#f3ead6; --muted:#7a6a4f; --red:#b3261e; }
+  :root { --ink:#2b2115; --paper:#f3ead6; --muted:#6b5c43; --red:#b3261e; }
   * { box-sizing: border-box; }
   html, body { height:100%; } body { margin:0; background:#d9cfb8; font-family: Georgia, 'Times New Roman', serif; color:var(--ink); }
   #app { background:var(--paper); }
@@ -83,11 +83,12 @@ button.primary { color:#fff; }
 }
 
 /* Landscape / desktop: map on the left at full height, command panel on the right */
-@media (min-aspect-ratio: 1/1) and (min-width: 820px) {
+@media (min-aspect-ratio: 1/1) and (min-width: 820px), (min-aspect-ratio: 3/2) and (min-width: 640px) and (max-height: 500px) {
   .layout { grid-template-columns:minmax(0, 1fr) clamp(300px, 30vw, 420px);
-    grid-template-rows:auto auto minmax(0, 1fr) auto;
-    grid-template-areas:"map head" "map lens" "map body" "map bar"; padding:12px 16px; }
-  .sidebody { max-height:none; }
+    grid-template-rows:auto auto auto auto minmax(0, 1fr);
+    grid-template-areas:"map head" "map lens" "map body" "map bar" "map ."; padding:12px 16px; }
+  .sidebody { max-height:62vh; } /* the buttons follow the panel instead of sinking to the bottom of a tall screen */
+  .side .bar { margin-top:10px; }
   header { font-size:15px; } .stats { font-size:14px; } .decree { font-size:13.5px; -webkit-line-clamp:4; }
   .forecast, .panel { font-size:14px; }
   .side .bar button { font-size:14px; padding:10px 12px; }
@@ -150,7 +151,7 @@ table.lb td:last-child { text-align:right; font-weight:bold; } table.lb tr.mine 
 .loading { height:100vh; display:flex; align-items:center; justify-content:center; font-style:italic; color:var(--muted); }
 
 /* Game over on narrow screens: the result card gets most of the height, the map shrinks to a preview. */
-@media (max-width: 820px), (max-aspect-ratio: 1/1) {
+@media (max-aspect-ratio: 1/1), (max-width: 639px), (max-width: 820px) and (min-height: 501px), (max-width: 820px) and (max-aspect-ratio: 3/2) {
   .layout.over { grid-template-rows:auto auto minmax(140px, 0.7fr) minmax(0, 1.3fr) auto; }
   .layout.over .sidebody { max-height:none; }
 }
@@ -172,11 +173,11 @@ table.lb td:last-child { text-align:right; font-weight:bold; } table.lb tr.mine 
 .msg { display:flex; gap:8px; align-items:flex-start; } .msg span { flex:1; }
 .msg button { border:none; background:none; font-size:16px; line-height:1; padding:0 2px; color:var(--muted); }
 
-/* ---------- End of game: verdict button over the map, then a separate results page ---------- */
-.verdict { position:absolute; left:50%; top:50%; transform:translate(-50%, -50%); z-index:6;
+/* ---------- End of game: verdict button beside the board (never over it), then a separate results page ---------- */
+.verdict { position:relative; display:block; margin:8px auto 4px; z-index:6; white-space:nowrap; max-width:100%;
   font-size:17px; font-weight:bold; color:#fff; background:#8b1a1a; border:2px solid #5a1010; border-radius:999px;
-  padding:14px 26px; box-shadow:0 8px 28px rgba(43, 26, 5, .35); animation:verdictIn .6s ease-out 1.2s both, glow 2.4s ease-in-out 2s infinite; }
-@keyframes verdictIn { from { opacity:0; transform:translate(-50%, -40%); } }
+  padding:14px 26px; box-shadow:0 8px 28px rgba(43, 26, 5, .35); animation:verdictIn .6s ease-out 1.2s both, glow 2.4s ease-in-out 2s 3; }
+@keyframes verdictIn { from { opacity:0; transform:translateY(16px); } }
 @keyframes glow { 50% { box-shadow:0 8px 34px rgba(201, 151, 31, .7); } }
 .overnote { font-style:italic; color:var(--muted); padding:6px 0; }
 .practice { font-size:.8em; background:#c27c0e; color:#fff; border-radius:8px; padding:0 6px; }
@@ -202,7 +203,7 @@ table.brk tr.tot td { font-weight:bold; border-top:1px solid #c9b88f; }
 .ractions { display:grid; grid-template-columns:1fr 1fr; gap:8px; margin:10px 0; }
 .debug button { margin:4px 6px 4px 0; border-color:#b3261e; color:#b3261e; }
 .center { text-align:center; } .small { font-size:11.5px; }
-@media (min-width: 1200px) and (min-height: 820px) { .results { zoom:1.2; } }
+@media (min-width: 1200px) and (min-height: 820px) { .results { font-size:17px; } .results .rcard, .results .hero, .results .quick, .results .ractions { max-width:820px; margin-left:auto; margin-right:auto; } }
 
 /* Rivals and sharing */
 button.follow { font-size:11px; padding:1px 6px; border-radius:9px; margin-left:4px; vertical-align:1px; }
@@ -317,6 +318,7 @@ details summary { cursor:pointer; font-size:12px; color:var(--muted); }
 .tribe.rome { background:#8b1a1a; color:#fff; }
 /* prices */
 .price { display:inline-block; padding:0 6px; border-radius:9px; font-size:.9em; font-weight:bold; margin-left:2px; white-space:nowrap; }
+.price .rico { margin-right:.12em; } .price.short .pw { display:none; } .price.short { padding:0 4px; }
 .price.ok { background:#dcefd6; color:#1f6b2a; border:1px solid #7fb36f; } .price.no { background:#f7d9d4; color:#a3271f; border:1px solid #d98b80; }
 .mile.poor text { fill:#b3261e; } .mile.poor path { stroke:#b3261e; }
 /* decree banner = a button that opens the decree */
@@ -446,7 +448,7 @@ button.link { background:none; border:none; color:inherit; opacity:.75; text-dec
 .strip .cell.seen { background:#f6ecd2; }
 .strip .tn { font-size:10.5px; letter-spacing:.04em; text-transform:uppercase; color:#6a4a14; line-height:1.2; }
 .strip .chips { display:flex; flex-wrap:wrap; gap:3px; margin-top:1px; }
-.strip .quiet { font:italic 11px Georgia,serif; color:#9a8a6a; }
+.strip .quiet { font:italic 12px Georgia,serif; color:#6b5c43; }
 .chip { position:relative; display:inline-flex; align-items:center; gap:1px; height:24px; padding:0 4px 0 3px; border-radius:12px; border:2px solid var(--tc, #8a7a5a); background:#fffaf0; font-size:14px; line-height:1; cursor:help; }
 .chip i { font-style:normal; font-size:9px; color:var(--tc, #8a7a5a); -webkit-text-stroke:.3px #1d1409; }
 .chip b { font:bold 10px system-ui,sans-serif; margin-left:2px; padding:0 3px; border-radius:6px; }
@@ -465,7 +467,7 @@ button.link { background:none; border:none; color:inherit; opacity:.75; text-dec
 .status.move { border-left:4px solid var(--leg); } .status.msg2 { display:flex; align-items:center; gap:8px; background:#fbe9c4; }
 .status.msg2 span { flex:1; } .status.msg2 button { border:0; background:none; font-size:16px; cursor:pointer; }
 /* stacked layout (map above the panel): give the map the room */
-@media (max-width: 820px), (max-aspect-ratio: 1/1) {
+@media (max-aspect-ratio: 1/1), (max-width: 639px), (max-width: 820px) and (min-height: 501px), (max-width: 820px) and (max-aspect-ratio: 3/2) {
   .decree { display:block; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; padding:3px 6px; margin-top:4px; }
   .decree:not(.open) .dtext { display:none; }
   .tribekey .tribe { font-size:11px; padding:1px 6px; }
@@ -483,8 +485,8 @@ button.link { background:none; border:none; color:inherit; opacity:.75; text-dec
 .layout.compact.over { grid-template-rows:auto auto minmax(140px, 0.7fr) minmax(0, 1.3fr) auto auto; }
 .mini { grid-area:mini; display:flex; align-items:center; gap:6px; margin:4px 0 0; font-size:14px; min-width:0; }
 .mini .mstat { white-space:nowrap; cursor:help; } .mini .mstat b { font-size:15px; }
-.mini .mstat small { color:#2e7d32; font-weight:bold; margin-left:1px; } .mini .mstat sup { color:#9a5f00; font-weight:bold; margin-left:1px; }
-.mini .mstat.warn, .mini .mstat.warn sup { color:#b3261e; }
+.mini .mstat small { color:#2e7d32; font-weight:bold; margin-left:1px; } .mini .mstat .idl, .uisheet .mstat .idl { color:#9a5f00; font-weight:bold; font-style:normal; font-size:.82em; margin-left:3px; } .mstat .idl::before { content:'· '; color:#9a8a6a; font-weight:normal; }
+.mini .mstat.warn, .mini .mstat.warn .idl { color:#b3261e; }
 .mini .mdec { border:1.5px solid #8a6a2c; border-radius:14px; padding:2px 8px; background:#f6ecd2; font:inherit; cursor:pointer; white-space:nowrap; }
 .mini .mdec.on b { color:#fff; background:#2e7d32; border-radius:8px; padding:0 5px; }
 .mini .mdec.populares { border-color:#8b1a1a; } .mini .mdec.optimates { border-color:#1f5fa8; } .mini .mdec.augures { border-color:#2e6b34; }
@@ -492,16 +494,16 @@ button.link { background:none; border:none; color:inherit; opacity:.75; text-dec
 .mini .micons button { width:32px; height:32px; border-radius:16px; padding:0; font-size:14px; display:inline-flex; align-items:center; justify-content:center; }
 .mini .micons button.off { opacity:.5; }
 .layout.compact .bar { margin-top:4px; }
-@media (max-width: 380px) { .mini { gap:4px; font-size:13px; } .mini .micons button { width:29px; height:29px; } .mini .mstat sup { display:none; } }
+@media (max-width: 380px) { .mini { gap:4px; font-size:13px; } .mini .micons button { width:34px; height:34px; } .mini .mstat .idl { display:none; } }
 .mini .mlabel { font-size:13px; }
-@media (max-width: 360px) { .mini .mlabel { display:none; } }
+@media (max-width: 330px) { .mini .mlabel { display:none; } }
 /* "?" → The screen */
 .uisheet .uirow { display:grid; grid-template-columns:132px 1fr; gap:10px; align-items:center; padding:5px 0; border-bottom:1px dotted #d6c49a; font-size:14px; }
 .uisheet .uipic { display:flex; justify-content:center; font-size:20px; }
 .uisheet .chip, .uisheet .mstat, .uisheet .mdec { font-size:14px; }
 .uisheet .mdec { border:1.5px solid #8a6a2c; border-radius:14px; padding:2px 8px; background:#f6ecd2; white-space:nowrap; }
 .uisheet .mdec.on b { color:#fff; background:#2e7d32; border-radius:8px; padding:0 5px; }
-.uisheet .mstat small { color:#2e7d32; font-weight:bold; } .uisheet .mstat sup { color:#9a5f00; font-weight:bold; }
+.uisheet .mstat small { color:#2e7d32; font-weight:bold; } 
 .lensdemo { display:inline-flex; background:rgba(43,33,22,.82); border-radius:14px; padding:2px; font-size:11px; } .lensdemo span { color:#f3e6c4; padding:2px 7px; border-radius:12px; } .lensdemo .on { background:#f3e6c4; color:#2b2116; }
 .tstars-demo { color:#f2c230; -webkit-text-stroke:.6px #1d1409; font-size:15px; } .cdemo { display:inline-block; width:14px; height:14px; border-radius:7px; background:#f2c230; border:1.4px solid #1d1409; color:#8a5a0c; font:bold 8px/12px Georgia,serif; text-align:center; -webkit-text-stroke:0; margin-left:3px; vertical-align:2px; }
 .badge-demo { display:inline-flex; width:22px; height:22px; border-radius:11px; background:#245a78; color:#f3e6c4; align-items:center; justify-content:center; font-size:13px; }
@@ -531,3 +533,198 @@ button.link { background:none; border:none; color:inherit; opacity:.75; text-dec
 .attpar { position: absolute; left: 0; right: 0; border-top: 1px dashed #8884; pointer-events: none; }
 .attpar span { position: absolute; right: 2px; top: -13px; font-size: 10px; color: #888; }
 .attempts .muted.small { margin-top: 4px; }
+
+/* tribe names coloured inside tips and the tutorial */
+.tribe.tiny { padding:0 4px; font-size:.9em; line-height:1.3; border-color:rgba(0,0,0,.45); }
+.tipbub .tribe.tiny { border-color:rgba(255,255,255,.25); }
+
+/* achievements */
+.medal { display:inline-flex; align-items:center; justify-content:center; width:34px; height:34px; flex:none; border-radius:50%; font-size:15px; font-weight:bold; font-family:Georgia,serif; color:#2b2116;
+  box-shadow: inset 0 0 0 3px rgba(255,255,255,.35), inset 0 -3px 5px rgba(0,0,0,.25), 0 1px 3px rgba(0,0,0,.35); border:2px solid; }
+.medal > span { filter: drop-shadow(0 1px 0 rgba(255,255,255,.4)); }
+.medal.copper { background: radial-gradient(circle at 35% 30%, #f3b98c, #b87333 55%, #7a4519); border-color:#6b3c15; }
+.medal.silver { background: radial-gradient(circle at 35% 30%, #ffffff, #c4c7cc 55%, #868b93); border-color:#6d7178; }
+.medal.gold { background: radial-gradient(circle at 35% 30%, #fff4b0, #e0b12e 55%, #9c7414); border-color:#7f5d0d; }
+.medal.locked { filter: grayscale(1); opacity:.35; }
+.achs h3 .muted { font-weight:normal; font-size:.85em; }
+.achbar { position:relative; height:14px; border-radius:7px; background:#e8dcc0; overflow:hidden; margin:4px 0 8px; }
+.achbar i { position:absolute; inset:0 auto 0 0; background:linear-gradient(90deg,#b87333,#c4c7cc 50%,#e0b12e); }
+.achbar span { position:relative; display:block; text-align:center; font:bold 10px/14px system-ui,sans-serif; color:#2b2116; }
+.achstrip { display:flex; flex-wrap:wrap; gap:4px; margin-bottom:6px; }
+.achstrip .medal { width:28px; height:28px; font-size:12px; }
+.achs h4 { margin:10px 0 4px; font-size:.85em; text-transform:uppercase; letter-spacing:.06em; color:#7a6a4a; }
+.achgrid { display:grid; grid-template-columns:repeat(auto-fill,minmax(190px,1fr)); gap:6px; }
+.ach { display:flex; gap:8px; align-items:center; padding:5px 6px; border-radius:8px; background:#fffaf0; border:1px solid #e3d5b5; }
+.ach b { display:block; font-size:.9em; }
+.ach small { display:block; font-size:.75em; color:#6b5d42; line-height:1.25; }
+.ach small.rare { color:#9a8a6a; font-style:italic; }
+.ach.locked b { color:#8a7d62; }
+.achtoast { position:fixed; z-index:60; left:50%; top:12px; transform:translate(-50%,-140%); transition:transform .35s ease; background:#2b2116; color:#f3e6c4; border:1px solid #d4a017;
+  border-radius:12px; padding:8px 14px; box-shadow:0 6px 18px rgba(0,0,0,.4); font-family:Georgia,serif; pointer-events:none; max-width:92vw; }
+.achtoast.on { transform:translate(-50%,0); }
+.achtoast .achrow { display:flex; gap:10px; align-items:center; margin:2px 0; }
+.achtoast small { display:block; font-size:11px; color:#d8c79c; } .achtoast b { font-size:15px; }
+
+/* bottom bar on narrow screens: shed detail until it fits (set by render) */
+.mini.tight1 .mstat .idl { display:none; }
+.mini.tight2 .mlabel { display:none; }
+.mini.tight3 { gap:3px; } .mini.tight3 .micons { gap:2px; } .mini.tight3 .micons button { width:28px; height:28px; }
+
+/* snoovatars on the leaderboard and rivals: the image covers the initial when it loads */
+.av { position:relative; display:inline-flex; align-items:center; justify-content:center; width:22px; height:22px; border-radius:50%; margin-right:6px; vertical-align:middle;
+  background:hsl(var(--avh) 45% 42%); color:#fff; font:bold 11px system-ui,sans-serif; overflow:hidden; flex:none; }
+.av img { position:absolute; inset:0; width:100%; height:100%; object-fit:cover; object-position:50% 15%; background:#f3ead4; }
+
+/* challenge card */
+.chalbox { max-width:420px; }
+.chalbox h3 { margin:0 0 10px; }
+.chalcard { background:#fffaf0; border:1px solid #d9c79f; border-radius:12px; padding:12px; box-shadow:0 2px 8px rgba(60,40,10,.12); }
+.chalmsg { font-size:16px; line-height:1.4; }
+.challink { display:flex; gap:10px; align-items:center; margin-top:10px; padding:8px 10px; border-radius:10px; background:#f3e6c4; border-left:4px solid #8b1a1a; }
+.challink .seal { font-size:22px; }
+.challink b { display:block; } .challink small { display:block; color:#6b5d42; font-size:12px; word-break:break-all; }
+.chalbtns { display:flex; flex-wrap:wrap; gap:8px; margin:12px 0 6px; }
+.chalbtns button { flex:1 1 120px; }
+
+/* one-shot effects (fx.ts) */
+#map .fxl { pointer-events:none; }
+#map .fxnum { font-weight:bold; font-family:Georgia,serif; paint-order:stroke; stroke:#2b2116; stroke-linejoin:round; pointer-events:none; }
+#map .fxnum.g { fill:#ffd23f; } #map .fxnum.c { fill:#f2c230; } #map .fxnum.r { fill:#ff6b4a; }
+[data-ctr] { display:inline-block; }
+
+/* part 3 effects: vote token, laurel wreath, dusk */
+.vtoken { position:absolute; top:-12px; right:-10px; width:28px; height:28px; border-radius:50%; color:#fff; font:bold 15px/28px Georgia,serif; text-align:center;
+  border:2px solid #f3e2b0; box-shadow:0 2px 4px rgba(0,0,0,.4), inset 0 -3px 0 rgba(0,0,0,.25); pointer-events:none; }
+.wreath { position:relative; display:flex; align-items:center; justify-content:center; width:230px; height:120px; margin:4px auto 6px; isolation:isolate; }
+.wreath .laurel { position:absolute; inset:0; width:100%; height:100%; z-index:-1; pointer-events:none; opacity:.85; }
+.wreath .big { position:relative; margin-top:-8px; }
+.big.shine { background:linear-gradient(110deg,#7a5a10 0%,#7a5a10 40%,#ffe58a 50%,#7a5a10 60%,#7a5a10 100%); background-size:300% 100%; background-position:0% 0;
+  -webkit-background-clip:text; background-clip:text; color:transparent; }
+.mapwrap .dusk { position:absolute; inset:0; pointer-events:none; z-index:2; border-radius:inherit;
+  background:radial-gradient(120% 90% at 50% 35%, rgba(255,170,90,.14), rgba(90,40,90,.36) 70%, rgba(40,20,60,.5)); mix-blend-mode:multiply; }
+
+/* achievement unlocked: the medal is struck and spins in, a shine crosses it, sparks fly */
+.achtoast.on .medal { animation:medalIn .9s cubic-bezier(.2,.8,.3,1.2) both; position:relative; overflow:hidden; }
+.achtoast.on .achrow:nth-child(2) .medal { animation-delay:.25s; } .achtoast.on .achrow:nth-child(3) .medal { animation-delay:.5s; }
+.achtoast.on .medal::after { content:''; position:absolute; inset:-20%; background:linear-gradient(115deg,transparent 35%,rgba(255,255,255,.85) 50%,transparent 65%); transform:translateX(-120%); animation:medalShine .7s ease-in-out .75s both; }
+.achtoast.on .achrow:nth-child(2) .medal::after { animation-delay:1s; } .achtoast.on .achrow:nth-child(3) .medal::after { animation-delay:1.25s; }
+.achtoast .spark { position:absolute; width:4px; height:4px; border-radius:50%; background:#ffd84a; pointer-events:none; }
+@keyframes medalIn { 0% { transform:scale(0) rotateY(0); } 60% { transform:scale(1.35) rotateY(540deg); } 100% { transform:scale(1) rotateY(720deg); } }
+@keyframes medalShine { to { transform:translateX(120%); } }
+@media (prefers-reduced-motion: reduce) { .achtoast.on .medal, .achtoast.on .medal::after { animation:none; } }
+@media (max-width:360px) { .verdict { font-size:15px; padding:12px 18px; } }
+#map .fxnum.b { fill:#7fc0ff; }
+/* the decree's wax seal (fxDecreeOpen): two halves of one disc, cut along the same jagged line */
+.dseal { position:absolute; width:40px; height:40px; pointer-events:none; z-index:11; }
+.dseal i { position:absolute; inset:0; border-radius:50%; box-shadow:inset 0 0 0 3px rgba(0,0,0,.25), inset 0 -4px 0 rgba(0,0,0,.2), 0 2px 3px rgba(0,0,0,.35);
+  color:#f3d9a0; font:bold 9px/40px Georgia,serif; text-align:center; letter-spacing:.04em; font-style:normal; }
+.dseal i:first-child { clip-path:polygon(0 0,52% 0,44% 30%,56% 55%,46% 100%,0 100%); }
+.dseal i:nth-child(2) { clip-path:polygon(52% 0,100% 0,100% 100%,46% 100%,56% 55%,44% 30%); }
+.dseal .dcrack { position:absolute; inset:0; background:#fff3c0; clip-path:polygon(50% 0,53% 0,45% 30%,57% 55%,48% 100%,45% 100%,54% 55%,42% 30%); opacity:0; }
+
+.leg-inline .idletag { color:#9a5f00; font-weight:bold; margin-left:3px; }
+
+/* results: the version line is a footnote; an odd last action button takes the whole row */
+.results .ver { font-size:10.5px; color:#8a7a5a; font-family:system-ui, sans-serif; margin:10px 0 4px; }
+.ractions > button:last-child:nth-child(odd) { grid-column:1 / -1; }
+.ractions .link, .muted .link { background:none; border:0; color:#8b1a1a; text-decoration:underline; font:inherit; cursor:pointer; padding:0 2px; }
+/* End turn armed: the roads about to be lost pulse */
+#map.confirming g.road.threat path.glow { animation:armpulse .8s ease-in-out infinite alternate; }
+@keyframes armpulse { to { opacity:.25; } }
+
+/* results: the version line is a footnote; an odd last action button takes the whole row */
+.results .ver { font-size:10.5px; color:#8a7a5a; font-family:system-ui, sans-serif; margin:10px 0 4px; }
+.ractions > button:last-child:nth-child(odd) { grid-column:1 / -1; }
+.ractions .link, .muted .link { background:none; border:0; color:#8b1a1a; text-decoration:underline; font:inherit; cursor:pointer; padding:0 2px; }
+/* End turn armed: the roads about to be lost pulse */
+#map.confirming g.road.threat path.glow { animation:armpulse .8s ease-in-out infinite alternate; }
+@keyframes armpulse { to { opacity:.25; } }
+@media (prefers-reduced-motion: reduce) { #map.confirming g.road.threat path.glow { animation:none; opacity:.5; } }
+
+/* the two currencies read first in the bar: bigger, bold, the star in gold */
+.mini .mstat.money b { font-size:19px; font-weight:800; letter-spacing:-.01em; }
+.mini .mstat.money .mico { font-style:normal; font-size:18px; margin-right:2px; vertical-align:-1px; }
+.mini .mstat.money .mico.star { color:#b8860b; -webkit-text-stroke:.6px #6b4a0a; }
+.mini .mstat.money small { font-size:12.5px; }
+@media (max-width: 380px) { .mini .mstat.money b { font-size:17px; } .mini .mstat.money .mico { font-size:16px; } }
+.stats .money b { font-size:1.3em; font-weight:800; } .stats .money .mico { font-style:normal; margin-right:2px; } .stats .money .mico.star { color:#b8860b; }
+.rtop .icons .skq { width:auto; padding:0 10px; font-size:13px; font-weight:bold; color:#fff; background:#8b1a1a; border-color:#5a1010; border-radius:999px; }
+
+/* the pinch-to-zoom hint (fxPinchHint): a white hand over the middle of the map, once per device */
+.pinchhint { position:absolute; left:50%; top:50%; width:132px; margin:-76px 0 0 -66px; z-index:5; pointer-events:none; text-align:center;
+  filter:drop-shadow(0 3px 6px rgba(0,0,0,.45)); }
+.pinchhint .ph-anim { width:132px; height:132px; } .pinchhint .ph-anim svg { overflow:visible; }
+.pinchhint span { display:inline-block; margin-top:2px; font:bold 13px system-ui, sans-serif; color:#fff; background:rgba(29,20,9,.6); padding:3px 9px; border-radius:999px; }
+/* results: the three things people do first, right under the score */
+.results .quick { display:flex; gap:8px; justify-content:center; flex-wrap:wrap; margin:8px 0 12px; }
+.results .quick button { flex:1 1 0; min-width:96px; min-height:40px; padding:6px 10px; border-radius:10px; border:1px solid #c9b88f; background:#fbf6ea; color:#2b2116; font:inherit; font-size:14px; cursor:pointer; }
+.results .quick #shareimg { background:#8b1a1a; color:#fff; border-color:#5a1010; font-weight:bold; }
+.hero .vs .pct { font-size:.85em; color:#8a7a5a; }
+.lbme { display:flex; gap:6px; align-items:center; justify-content:flex-start; padding:4px 6px; margin-top:4px; border-top:1px dashed #d9c79f; font-size:14px; background:#fff3cf; border-radius:6px; }
+.lbme span { font-weight:bold; min-width:34px; }
+.imgsheet .sheetbox { max-width:440px; text-align:center; }
+.imgsheet img { width:100%; height:auto; border-radius:10px; box-shadow:0 2px 10px rgba(0,0,0,.25); margin:18px 0 8px; -webkit-touch-callout:default; user-select:auto; }
+.imgbtns { display:flex; justify-content:center; gap:8px; margin-bottom:6px; } .imgbtns button { padding:10px 26px; font-size:16px; }
+
+/* narrow phones: the bar keeps sound and help; music moves to the rules sheet */
+@media (max-width: 420px) { .mini #mus { display:none; } .rtop > b { display:none; } .rtop .muted { font-weight:bold; color:#2b2116; } }
+.sheetfoot { margin-top:8px; text-align:center; } .sheetfoot .link { background:none; border:0; color:#8b1a1a; text-decoration:underline; font:inherit; font-size:13px; cursor:pointer; }
+
+/* the lens toggle: no "auto/manual" word; on narrow phones it moves to the top-right corner, off the castra */
+.mapwrap .lens .lensmode { display:none; }
+@media (max-width: 400px) { .mapwrap .lens { bottom:auto; top:6px; } }
+/* safe areas (iPhone home bar, notches) in full-screen view */
+.bar { margin-bottom:env(safe-area-inset-bottom, 0px); } /* the button row stays above the iPhone home bar (padding on .layout would override its own) */
+.results { padding-bottom:calc(16px + env(safe-area-inset-bottom, 0)); }
+.sheet .sheetbox { margin-bottom:max(12px, env(safe-area-inset-bottom, 0)); }
+/* town names: unlinked towns in a muted italic, long names a size smaller */
+#map .tname.off { fill:#5a4b33; font-style:italic; }
+#map .tname.long { font-size:.88em; }
+/* factions carry a mark, not colour alone */
+.fac::before, .dfac::before { display:inline-block; width:1.15em; height:1.15em; line-height:1.15em; border-radius:50%; text-align:center; font-size:.75em; font-weight:bold; font-variant:normal; color:#fff; margin-right:.3em; vertical-align:.08em; }
+.fac.populares::before, .populares .dfac::before { content:'P'; background:#8b1a1a; }
+.fac.optimates::before, .optimates .dfac::before { content:'O'; background:#1f5fa8; }
+.fac.augures::before, .augures .dfac::before { content:'A'; background:#2e6b34; }
+/* keyboard focus is visible */
+button:focus-visible, [tabindex]:focus-visible { outline:3px solid #d4a017; outline-offset:2px; }
+@media (prefers-reduced-motion: reduce) { .verdict { animation:none; } }
+
+.rcard h3 .closes { font-size:.72em; font-weight:normal; color:#8b1a1a; }
+.hero .htag { display:inline-block; margin-bottom:4px; padding:2px 10px; border-radius:999px; background:#6b5d42; color:#fff; font:bold 11px system-ui, sans-serif; letter-spacing:.06em; text-transform:uppercase; }
+.hero.prac .big { color:#6b5d42; }
+@media (min-width: 900px) { .rcard.chart svg.scorechart { max-height:260px; } }
+.status.tip { background:#fff3cf; border-left:3px solid #d4a017; font-size:13px; }
+/* skirmish personal best: the old best struck through in red ink (fxBest animates --sx), the new one stamped */
+@property --sx { syntax:'<number>'; inherits:false; initial-value:1; }
+.oldbest { position:relative; text-decoration:none; color:#8a7a5a; }
+.oldbest::after { content:''; position:absolute; left:-3px; right:-3px; top:52%; height:2px; background:#b3261e; transform:scaleX(var(--sx)); transform-origin:left center; border-radius:2px; }
+.newbest { color:#8a5f0e; }
+.streak .flame { font-style:normal; }
+
+/* achievement toast: at the bottom on phones (the top bar holds sound and help); a tap dismisses it */
+.achtoast { pointer-events:auto; cursor:pointer; }
+@media (max-width: 520px) { .achtoast { top:auto; bottom:calc(96px + env(safe-area-inset-bottom, 0)); transform:translate(-50%, 160%); } .achtoast.on { transform:translate(-50%, 0); } }
+.strip .cell.cur, .strip .cell.seen { min-width:0; } .strip { min-width:0; }
+
+/* achievements: a won card opens to say how it was won */
+.ach.won { font:inherit; color:inherit; text-align:left; cursor:pointer; width:100%; }
+.ach.won u { text-decoration:underline dotted; color:#8b1a1a; }
+.ach.won.open { grid-column:1 / -1; background:#fff6dc; border-color:#d4a017; }
+.ach .why { display:block; margin-top:4px; padding-top:4px; border-top:1px dashed #e3d5b5; color:#3b2a1a; font-size:.8em; line-height:1.35; }
+.medalbtn { background:none; border:0; padding:0; cursor:pointer; }
+.achtoast .awhy { display:block; font-size:11px; color:#e9dcb8; font-style:italic; max-width:300px; }
+.medal.silver > span, .medal.gold > span, .medal.copper > span { letter-spacing:-.06em; }
+/* side panel on big screens (zoomed 1.2–1.55): the three buttons share the column instead of running off it */
+.side .bar > button { flex:1 1 0; min-width:0; } .side .bar > .endbtn { flex-grow:1.7; } .side .endbtn small { white-space:normal; }
+
+/* resource symbols beside every written mention (resources.ts) */
+.rico { font-style:normal; margin-right:.15em; display:inline-block; line-height:1; }
+.rico.glory { color:#b8860b; -webkit-text-stroke:.4px #6b4a0a; }
+
+/* the denarius in HTML: the map's gold coin with a D (coin.ts), never the 🪙 emoji */
+.dcoin { display:inline-block; width:1em; height:1em; vertical-align:-.14em; overflow:visible; }
+.dcoin circle { fill:#f2c230; stroke:#1d1409; stroke-width:1.1; }
+.dcoin text { font:bold 7px Georgia,serif; text-anchor:middle; fill:#8a5a0c; }
+.rico.coin { margin-right:.15em; }
+.mico.coin .dcoin { width:.95em; height:.95em; vertical-align:-.12em; }
+.medal .dcoin { width:1.1em; height:1.1em; }

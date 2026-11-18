@@ -7,9 +7,11 @@
 // best play is reading time for nothing. Writes docs/events-benchmark.md; exit 1 on any failure.
 //   npm run sim:events -- [days=10] [beam=12]      EVENT=bandits npm run sim:events  (one event)
 import { writeFileSync, mkdirSync } from 'node:fs';
-import { EVENTS, Rng, apply, checkAction, generate, initialState, isOver, score, shores } from '../../src/shared/engine';
+import { eventsAsOf, Rng, apply, checkAction, generate, initialState, isOver, score, shores } from '../../src/shared/engine';
 import type { Action, EventSpec, GameEvent, Scenario, State } from '../../src/shared/engine';
 import { solve } from './solver';
+import { BOTS, playTurn } from './bots';
+import { gambitOffers } from '../../src/shared/engine';
 
 const DAYS = Number(process.argv[2] ?? 10);
 const BEAM = Number(process.argv[3] ?? 12);
@@ -55,6 +57,26 @@ function inject(sc: Scenario, spec: EventSpec, seed: string): Scenario {
 
 const t0 = Date.now();
 const base = seeds.map((seed) => { const sc = generate(seed); return { seed, sc, ...run(sc) }; });
+/** The forecast bot (sees 2 turns, no long plan), taking every offer the moment it appears, or none. */
+function botScore(sc: Scenario, take: boolean): number {
+  let s: State = initialState(sc);
+  while (!isOver(sc, s)) {
+    if (take) for (const i of gambitOffers(sc, s)) s = apply(sc, s, { type: 'accept', event: i });
+    s = playTurn(sc, s, BOTS.forecast!);
+  }
+  return score(sc, s).total;
+}
+/** Gambits: Caesar never takes them, so they are judged on a player who sees only the forecast. */
+const measureGambit = (spec: EventSpec) => {
+  // a gambit's worth swings with its turn: sample every turn of its window on every map
+  const turns = Array.from({ length: spec.gen.maxTurn - spec.gen.minTurn + 1 }, (_, k) => spec.gen.minTurn + k);
+  const d = base.flatMap((b) => turns.map((t) => {
+    const sc2 = inject(b.sc, spec, b.seed);
+    const sc3 = { ...sc2, events: sc2.events.map((e) => (e.kind === spec.kind && e.effect === spec.effect ? { ...e, turn: t } : e)).sort((x, y) => x.turn - y.turn) };
+    return botScore(sc3, true) - botScore(sc3, false);
+  }));
+  return { dPar: d.reduce((n, x) => n + x, 0) / d.length, changed: d.filter((x) => x !== 0).length / d.length, accepted: d.filter((x) => x < 0).length / d.length };
+};
 const measure = (spec: EventSpec) => {
   const res = base.map((b) => {
     const sc2 = inject(b.sc, spec, b.seed);
@@ -69,12 +91,13 @@ const measure = (spec: EventSpec) => {
 };
 const TOL = 0, NEED = MIN_CHANGED;
 type Row = { spec: EventSpec; dPar: number; changed: number; accepted: number; pass: boolean; why: string };
-const ACCEPT = [0.15, 0.85]; // a gambit must be a real choice: Caesar takes it on some maps, not on others
-const rows: Row[] = EVENTS.filter((e) => !ONLY || e.kind === ONLY).map((spec) => {
-  const { dPar, changed, accepted } = measure(spec);
+const BACKFIRE = [0.2, 0.6]; // a gambit must be a real risk for a player who sees the forecast: worth it on average, but it backfires on some maps
+const rows: Row[] = eventsAsOf().filter((e) => !ONLY || e.kind === ONLY).map((spec) => {
   const gambit = spec.tone === 'gambit';
+  const { dPar, changed, accepted } = gambit ? measureGambit(spec) : measure(spec);
   const dirOk = spec.tone === 'boon' || gambit ? dPar >= -TOL : dPar <= TOL;
-  const why = [gambit && (accepted < ACCEPT[0] || accepted > ACCEPT[1]) && `Caesar accepts it on ${Math.round(100 * accepted)}% of maps (need ${ACCEPT[0] * 100}–${ACCEPT[1] * 100}%)`,!dirOk && `score moves the wrong way (${dPar >= 0 ? '+' : ''}${dPar.toFixed(1)})`, changed < NEED && `changes Caesar's plan on only ${Math.round(100 * changed)}% of maps (need ${Math.round(100 * NEED)}%)`].filter(Boolean).join('; ');
+  // gambit: `dPar` = what taking it is worth to the forecast bot on average, `accepted` = share of maps where it backfires
+  const why = [gambit && (accepted < BACKFIRE[0] || accepted > BACKFIRE[1]) && `taking it backfires on ${Math.round(100 * accepted)}% of maps (need ${BACKFIRE[0] * 100}–${BACKFIRE[1] * 100}%: a real risk, not a trap)`,!dirOk && `score moves the wrong way (${dPar >= 0 ? '+' : ''}${dPar.toFixed(1)})`, changed < NEED && `changes Caesar's plan on only ${Math.round(100 * changed)}% of maps (need ${Math.round(100 * NEED)}%)`].filter(Boolean).join('; ');
   process.stderr.write(gambit ? `  accepted ${Math.round(100 * accepted)}%\n` : '');
   process.stderr.write(`${spec.kind}: Δpar ${dPar.toFixed(1)}, plan changed ${Math.round(100 * changed)}%\n`);
   return { spec, dPar, changed, accepted, pass: !why, why };
@@ -90,11 +113,11 @@ const md = [
   '',
   `**Pass rule.** Caesar's score moves in the event's direction on average (threats and hardships do not raise it, boons do not lower it), and his plan at dusk changes on ≥ ${Math.round(100 * NEED)}% of maps.`,
   '',
-  `**Gambits** (offers) must also be a real choice: Caesar accepts on ${ACCEPT[0] * 100}–${ACCEPT[1] * 100}% of maps, and declines on the rest. Their score can only rise (declining is free).`,
+  `**Gambits** (offers) are judged on a player, not on Caesar: Caesar never takes them (from 2026-11-16). The forecast bot (sees 2 turns, no long plan) takes every offer the moment it appears, against the same bot declining. Every turn of its window is tried on every map. Pass: worth it on average (Δ ≥ 0) and it backfires on ${BACKFIRE[0] * 100}–${BACKFIRE[1] * 100}% of maps. For gambits the columns read: Δ = gain for that player, plan changed = maps where taking it made any difference, last column = maps where it backfired.`,
   '',
-  '| event | tone | since | Δ Caesar score | plan changed | Caesar accepts | verdict |',
+  '| event | tone | since | Δ Caesar score (gambit: Δ player) | plan changed (gambit: made a difference) | gambit: backfires on | verdict |',
   '|---|---|---|---|---|---|---|',
-  ...rows.map((r) => `| ${r.spec.title} (\`${r.spec.kind}\`) | ${r.spec.tone}${r.spec.gen.rare ? ', rare' : ''} | ${r.spec.since ?? 'launch'} | ${r.dPar >= 0 ? '+' : ''}${r.dPar.toFixed(1)} | ${Math.round(100 * r.changed)}% | ${r.spec.tone === 'gambit' ? `${Math.round(100 * r.accepted)}%` : '–'} | ${r.pass ? 'PASS' : `FAIL: ${r.why}`} |`),
+  ...rows.map((r) => `| ${r.spec.title} (\`${r.spec.kind}\`) | ${r.spec.tone}${r.spec.gen.rare ? ', rare' : ''} | ${r.spec.since ?? 'launch'} | ${r.dPar >= 0 ? '+' : ''}${r.dPar.toFixed(1)} | ${Math.round(100 * r.changed)}% | ${r.spec.tone === 'gambit' ? `backfires ${Math.round(100 * r.accepted)}%` : '–'} | ${r.pass ? 'PASS' : `FAIL: ${r.why}`} |`),
   '',
 ].join('\n');
 mkdirSync('docs', { recursive: true });

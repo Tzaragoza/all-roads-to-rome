@@ -22,7 +22,7 @@ export const BOTS: Record<string, Params> = {
 };
 
 /** Forecast damage of a state: value that the next visible revolt would strand, + trapped legions. */
-function damage(sc: Scenario, s: State): number {
+export function damage(sc: Scenario, s: State): number {
   const pv = forecastPreview(sc, s);
   if (!pv) return 0;
   let d = 0;

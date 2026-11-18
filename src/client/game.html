@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en" class="h-full">
+<html lang="en" class="h-full" style="background:#f3ead6">
   <head>
     <meta charset="UTF-8" />
     <meta
@@ -7,8 +7,24 @@
       content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"
     />
     <title>devvit</title>
+    <!-- The loading screen paints with the page, before any script: the card's parchment and gold title (see arlr/boot.ts). -->
+    <style>
+      @font-face { font-family: 'Cinzel'; font-weight: 800; src: url('./cinzel-latin-800-normal.woff2') format('woff2'); font-display: swap; }
+      #boot { position: fixed; inset: 0; z-index: 100; background: #f3ead6; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; }
+      #boot h1 { margin: 0; padding: 0 18px; text-align: center; font-family: 'Cinzel', Georgia, serif; font-weight: 800; font-size: clamp(22px, 7vw, 34px); line-height: 1.15; letter-spacing: .04em;
+        background: linear-gradient(#fff3b0, #e8c25a 35%, #c9971f 55%, #e2b84a 75%, #8a5f0e); -webkit-background-clip: text; background-clip: text; color: transparent;
+        -webkit-text-stroke: .6px #4a3008; filter: drop-shadow(0 2px 1px rgba(43, 26, 5, .4)); }
+      #bootmap { height: 56vh; max-width: 90vw; display: flex; justify-content: center; }
+      #bootmap svg { height: 100%; width: auto; overflow: visible; }
+      #bootmap .bnet line { stroke: #8a7a5a; stroke-width: .6; stroke-dasharray: 1.4 1.2; opacity: .45; }
+      #bootmap .bpave line { stroke: #c9971f; stroke-width: 1.5; stroke-linecap: round; fill: none; }
+      #bootmap .btowns circle { stroke: #fff; stroke-width: .4; opacity: .55; }
+      #bootmap .btowns .bcastra { fill: #8b1a1a; stroke: #2b2115; stroke-width: .8; opacity: 1; }
+      #boot .bmsg { font: italic 15px Georgia, 'Times New Roman', serif; color: #7a6a4f; }
+    </style>
   </head>
   <body class="h-full">
+    <div id="boot" aria-label="Loading"><h1>All Roads Lead to Rome</h1><div id="bootmap"></div><div class="bmsg">Paving the roads to Rome…</div></div>
     <div id="root" class="h-full"></div>
     <script type="module" src="game.tsx"></script>
   </body>

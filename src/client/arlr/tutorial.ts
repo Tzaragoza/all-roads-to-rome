@@ -30,7 +30,8 @@ function build(): Scenario {
     towns, roads,
     tribes: [{ id: 0, name: 'Aedui' }, { id: 1, name: 'Remi' }],
     events: [{ turn: 3, kind: 'revolt', tribe: 1, effect: { type: 'cut', mode: 'all' } }],
-    decree: { kind: 'none', faction: 'populares', title: 'Training', text: 'No decree during training.', param: 0, bonus: 0 },
+    // a real per-turn decree, so the lesson on decrees shows its glory arriving from turn 1
+    decree: { kind: 'legatio', faction: 'populares', title: 'Embassies', text: 'Every tribe must feel Rome: every turn, +3 glory for each linked town in the tribe where you hold the fewest.', param: 0, bonus: 3 },
   };
 }
 export const TUTORIAL: Scenario = build();
@@ -56,13 +57,17 @@ const built = (g: TutView, a: number, b: number) => g.s.built[R(a, b)]!;
 
 export const STEPS: TutStep[] = [
   { id: 'welcome', next: 'Show me',
-    text: 'Welcome, legate! A one-minute practice campaign. The Roman camp {where} is your <b>castra</b>: every road starts there.' },
+    text: 'Welcome, general! A two-minute practice campaign. The Roman camp {where} is your <b>castra</b>: every road starts there.' },
   { id: 'road1', target: { road: R(0, 1) }, allow: (a) => a.type === 'road' && a.road === R(0, 1), done: (g) => built(g, 0, 1),
-    text: 'Tap the dashed road from the castra to <b>Aquae</b> to build it. Its milestone shows the price: 1 denarius.' },
+    text: 'Tap the dashed road from the castra to <b>Aquae</b> to build it. Its milestone shows the price: 1 <b>denarius</b>, Rome\'s coin.' },
   { id: 'road2', target: { road: R(1, 3) }, allow: (a) => a.type === 'road' && a.road === R(1, 3), done: (g) => built(g, 1, 3),
-    text: 'Aquae turned Roman: linked towns pay their ★ in glory every turn. Now build on to <b>Lutetia</b> (★★★): deeper towns are worth more, and 3★ towns also pay denarii.' },
+    text: 'Aquae turned Roman: linked towns pay their ★ in glory every turn. Now build on to <b>Lutetia</b> (★★★): deeper towns are worth more, and 3★ towns also pay denarii (money) every turn.' },
   { id: 'end1', target: { el: '#end' }, allow: (a) => a.type === 'end', done: (g) => g.s.turn >= 2,
-    text: 'End the turn to collect your glory and denarii.' },
+    text: 'End the turn to collect your glory (your score) and your denarii: the money you spend on roads, legions and garrisons.' },
+  { id: 'income', next: 'Next',
+    text: 'Your income: <b>+2 denarii</b> from the castra every turn, and <b>+1 per ★ above 2</b> from each linked town (Lutetia ★★★ pays +1). Glory: each linked town pays its ★ (Aquae 1 + Lutetia 3).' },
+  { id: 'decree', target: { el: '#decree' }, next: 'Next',
+    text: 'You also got <b>+3 glory</b> from the <b>📜 Decree</b>, the Senate\'s law of the day. Today, <b>Embassies</b>: +3 a turn per linked town in your weakest tribe (1 Aedui, 1 Remi). Tap it any time to reread it.' },
   { id: 'forecast', target: { el: '.forecast' }, next: 'Next',
     text: 'Trouble: the forecast says the <b>Remi</b> revolt at the end of next turn. A revolt cuts every road touching their lands that is not shielded.' },
   { id: 'events', next: 'Next',
@@ -86,6 +91,8 @@ export const STEPS: TutStep[] = [
     text: 'Win Alesia back by another route: build <b>Lutetia → Alesia</b>. It touches your legion\'s town, so it is shielded.' },
   { id: 'more', next: 'Next',
     text: 'Two more things. A <b>garrison</b> (tap a town) shields it and all its neighbours for good. A town cut off from the castra while it still has roads is <b>besieged</b>, and burns after 2 turns unless you reconnect it.' },
-  { id: 'senate', next: 'Begin your campaign',
-    text: 'Every day brings a new map and a <b>Senate decree</b> with a bonus. Score = glory + decree − lost legions. Beat Caesar\'s score, then compare with your rivals.' },
+  { id: 'senate', next: 'Next',
+    text: 'Every day has a new map and a new decree, and it changes the best plan: one pays for ports, another taxes long roads. Score = glory + decree − lost legions. Beat <b>Caesar\'s score</b>.' },
+  { id: 'vote', next: 'Begin your campaign',
+    text: 'After your campaign you <b>vote</b>: <b>Populares</b> or <b>Optimates</b> (sometimes the <b>Augures</b>). Each offers tomorrow\'s decree; the winner\'s becomes everyone\'s law. Next: today\'s real map{par}.' },
 ];

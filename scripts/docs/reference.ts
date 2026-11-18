@@ -3,7 +3,8 @@
 // Usage: npm run docs:reference
 // The decree evidence column is copied from docs/decrees-benchmark.md (npm run sim:decrees).
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
-import { DECREES, DEFAULT_GEN, DEFAULT_RULES, EVENTS } from '../../src/shared/engine';
+import { DECREES, DEFAULT_GEN, DEFAULT_RULES, eventsAsOf } from '../../src/shared/engine';
+const EVENTS = eventsAsOf(); // the registry as of today, dated revisions applied
 import type { EventEffect, EventSpec, EventTone, Rules } from '../../src/shared/engine';
 
 const OUT = 'docs/10-reference.md';

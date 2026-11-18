@@ -36,6 +36,8 @@ export type EventSpec = {
   retired?: string;
   /** Dated retunings of `gen`, oldest first; each applies from its `since` on. */
   tuning?: Array<{ since: string; gen: Partial<EventSpec['gen']> }>;
+  /** Dated rewrites of what the event does (effect and texts), oldest first; days before keep the old one. */
+  revisions?: Array<{ since: string; effect: EventEffect; text: EventSpec['text']; effectText: string }>;
 };
 
 /** Is a dated entry live on `date`? Undefined date = "now": every non-retired entry. */
@@ -46,9 +48,19 @@ export const liveOn = (e: { since?: string; retired?: string }, date?: string): 
 export function eventsAsOf(date?: string, registry: EventSpec[] = EVENTS): EventSpec[] {
   return registry.filter((e) => liveOn(e, date)).map((e) => {
     const t = (e.tuning ?? []).filter((x) => date === undefined || x.since <= date);
-    return t.length ? { ...e, gen: Object.assign({}, e.gen, ...t.map((x) => x.gen)) } : e;
+    const r = (e.revisions ?? []).filter((x) => date === undefined || x.since <= date).at(-1);
+    const tuned = t.length ? { ...e, gen: Object.assign({}, e.gen, ...t.map((x) => x.gen)) } : e;
+    return r ? { ...tuned, effect: r.effect, text: r.text, effectText: r.effectText } : tuned;
   });
 }
+
+/**
+ * The money-lenders' loan from 2026-11-16: paid at once, repaid in instalments on the turns after the
+ * offer, so repaying never freezes the treasury. Tuned for a player who sees only the forecast
+ * (scripts/sim/loan-sweep.ts, INSTALMENTS=1): worth it on average, but it backfires on ~40% of maps.
+ * Caesar never takes gambits (scripts/sim/fairness.ts), so they are the player's edge.
+ */
+export const LOAN = { now: 3, instalment: 3, count: 4 };
 
 export const EVENTS: EventSpec[] = [
   // ---- threats: cut roads
@@ -195,6 +207,16 @@ export const EVENTS: EventSpec[] = [
     gen: { weight: 2, minTurn: 2, maxTurn: 6, maxPerDay: 1 },
     text: ({ town, who, when }) => `The ${who} offer to raise an oppidum at ${town} ${when}: it gains <b>+1★</b>, but roads touching their towns cost <b>+2 for the rest of the day</b>.`,
     effectText: 'Accept: one town of the tribe gains +1★ for the day; roads touching the tribe cost +2 for the rest of the day.',
+    // from 16 Nov, balanced for a player who reads the forecast (Caesar no longer takes gambits): +1★ was a trap
+    revisions: [{
+      since: '2026-11-16',
+      effect: { type: 'gambit', parts: [
+        { delay: 0, icon: 'silver', effect: { type: 'boom', value: 2 }, text: 'the town is fortified into an oppidum: +2★ for the rest of the day' },
+        { delay: 0, icon: 'toll', effect: { type: 'toll', surcharge: 2, duration: 10 }, text: 'the works take every hand: roads touching the tribe cost +2 for the rest of the day' },
+      ] },
+      text: ({ town, who, when }) => `The ${who} offer to raise an oppidum at ${town} ${when}: it gains <b>+2★</b>, but roads touching their towns cost <b>+2 for the rest of the day</b>.`,
+      effectText: 'Accept: one town of the tribe gains +2★ for the day; roads touching the tribe cost +2 for the rest of the day.',
+    }],
   },
   {
     kind: 'frumentatio', title: 'Grain dole', tone: 'gambit', since: '2026-11-15',
@@ -202,6 +224,13 @@ export const EVENTS: EventSpec[] = [
     gen: { weight: 2, minTurn: 2, maxTurn: 7, maxPerDay: 1 },
     text: ({ who, when }) => `Feed the ${who} at Rome's expense ${when}: for 3 turns their towns pay <b>double glory</b> but <b>no denarii</b>.`,
     effectText: "Accept: for 3 turns from the offer, the tribe's supplied towns pay double glory and no denarii.",
+    // from 16 Nov: the dole outlasts the feast (one more turn without denarii), so it is a risk, not a gift
+    revisions: [{
+      since: '2026-11-16',
+      effect: { type: 'gambit', parts: [0, 1, 2, 3].map((d) => ({ delay: d, icon: 'harvest', effect: { type: 'yield' as const, glory: d < 3 ? 2 : 1, income: 0 }, text: d === 0 ? 'free grain: their supplied towns pay double glory and no denarii' : d < 3 ? 'the dole goes on: double glory, no denarii' : 'the granaries are empty: no denarii from their towns' })) },
+      text: ({ who, when }) => `Feed the ${who} at Rome's expense ${when}: for 3 turns their towns pay <b>double glory</b>, but <b>no denarii for 4 turns</b>.`,
+      effectText: "Accept: for 3 turns from the offer the tribe's supplied towns pay double glory and no denarii, and a 4th turn with no denarii.",
+    }],
   },
   {
     kind: 'argentarii', title: 'Money-lenders', tone: 'gambit', since: '2026-11-15',
@@ -212,6 +241,19 @@ export const EVENTS: EventSpec[] = [
     gen: { weight: 2, minTurn: 4, maxTurn: 7, maxPerDay: 1 }, // later offers: early money compounds too much
     text: ({ who, when }) => `${who} money-lenders offer a loan ${when}: <b>+8 denarii now</b>, <b>30 to repay</b> 3 turns later.`,
     effectText: 'Accept: +8 denarii at the end of the offer\'s turn; 3 turns later you repay 30; if the treasury cannot cover it, it goes into debt and nothing can be bought until it recovers.',
+    // from 16 Nov the loan is paid the moment you accept it, so it can be spent the same turn
+    revisions: [{
+      since: '2026-11-16',
+      effect: { type: 'gambit', parts: [
+        { delay: 0, now: true, icon: 'caravan', effect: { type: 'purse', denarii: LOAN.now, always: true }, text: `the argentarii lend you ${LOAN.now} denarii, paid at once` },
+        ...Array.from({ length: LOAN.count }, (_, k) => ({
+          delay: k + 1, icon: 'tribute', effect: { type: 'purse' as const, denarii: -LOAN.instalment, always: true },
+          text: `instalment ${k + 1} of ${LOAN.count}: you repay ${LOAN.instalment} denarii, in debt if need be`,
+        })),
+      ] },
+      text: ({ who, when }) => `${who} money-lenders offer a loan ${when}: <b>+${LOAN.now} denarii the moment you accept</b>, then <b>${LOAN.instalment} a turn for ${LOAN.count} turns</b>.`,
+      effectText: `Accept: +${LOAN.now} denarii at once, to spend this turn; then ${LOAN.instalment} denarii at the end of each of the next ${LOAN.count} turns after the offer (${LOAN.instalment * LOAN.count} in all; the game may end first). If the treasury cannot cover an instalment it goes into debt, and nothing can be bought until it recovers.`,
+    }],
   },
 
 ];

@@ -17,3 +17,6 @@ coverage
 docs/*
 !docs/fonts/
 !docs/rulebook.stamp.json
+
+# scratch output of offline tools
+tmp

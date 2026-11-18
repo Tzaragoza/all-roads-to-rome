@@ -119,7 +119,7 @@ export function liveEvents(sc: Scenario, s?: State): GameEvent[] {
   for (const i of s.accepted) {
     const g = sc.events[i];
     if (!g || g.effect.type !== 'gambit') continue;
-    for (const p of g.effect.parts) extra.push({ turn: g.turn + p.delay, kind: p.icon, tribe: g.tribe, ...(g.town !== undefined ? { town: g.town } : {}), effect: p.effect, from: i, note: p.text });
+    for (const p of g.effect.parts) if (!p.now) extra.push({ turn: g.turn + p.delay, kind: p.icon, tribe: g.tribe, ...(g.town !== undefined ? { town: g.town } : {}), effect: p.effect, from: i, note: p.text });
   }
   return [...sc.events, ...extra].sort((a, b) => a.turn - b.turn);
 }
@@ -253,6 +253,36 @@ export function cutsAt(sc: Scenario, s: State, turn: number): RoadId[] {
   return [...out];
 }
 
+/**
+ * Roads the revolts resolving at the end of `turn` would have cut with no protection but did not:
+ * what legions and garrisons saved (for the client's "held" effect; the rules never read it).
+ * Only roads saved by a legion or garrison count (not the castra's or a port's standing protection).
+ * `by` is the protected end of the road, where the shield is drawn; `tribe` the revolting tribe.
+ */
+export function heldAt(sc: Scenario, s: State, turn: number): Array<{ road: RoadId; by: TownId; tribe: number }> {
+  const cut = new Set(cutsAt(sc, s, turn)), none = new Array<boolean>(sc.towns.length).fill(false);
+  // only what the player's legions and garrisons did: the castra and ports are protected by rule, not by a choice
+  const military = (legionsOnly: boolean) => {
+    const p = new Array<boolean>(sc.towns.length).fill(false);
+    if (sc.rules.legionsShield !== false) for (const t of s.legions) p[t] = true;
+    if (!legionsOnly) { const adj = candidateAdj(sc); for (const t of sc.towns) if (s.garrison[t.id]) { p[t.id] = true; for (const { to } of adj[t.id]!) p[to] = true; } }
+    p[sc.castra] = false;
+    return p;
+  };
+  const prot = military(false);
+  const out = new Map<RoadId, { road: RoadId; by: TownId; tribe: number }>();
+  for (const e of liveEvents(sc, s)) {
+    if (e.turn !== turn || e.effect.type !== 'cut' || e.effect.pierce === 'all') continue;
+    const p = e.effect.pierce === 'garrison' ? military(true) : prot;
+    for (const r of roadsCutBy(sc, s, e.tribe, e.effect.mode, none, e.effect.where)) {
+      if (cut.has(r) || out.has(r)) continue;
+      const road = sc.roads[r]!, by = p[road.a] ? road.a : p[road.b] ? road.b : -1;
+      if (by >= 0) out.set(r, { road: r, by, tribe: e.tribe });
+    }
+  }
+  return [...out.values()];
+}
+
 export const isThreat = (e: GameEvent) => e.effect.type === 'cut';
 
 export interface ForecastPreview { turn: number; cut: RoadId[]; stranded: TownId[] }
@@ -326,7 +356,13 @@ export function apply(sc: Scenario, s: State, a: Action): State {
   switch (a.type) {
     case 'road': n.built[a.road] = true; n.denarii -= roadCost(sc, s, a.road); break;
     case 'camp': n.legions[a.legion] = a.town; n.moved[a.legion] = true; break;
-    case 'accept': n.accepted = [...(n.accepted ?? []), a.event]; break;
+    case 'accept': {
+      n.accepted = [...(n.accepted ?? []), a.event];
+      const g = sc.events[a.event]!.effect;
+      // parts marked `now` pay on the spot (a loan you can spend this very turn)
+      if (g.type === 'gambit') for (const p of g.parts) if (p.now && p.effect.type === 'purse') n.denarii += p.effect.denarii;
+      break;
+    }
     case 'garrison': n.garrison[a.town] = true; n.denarii -= garrisonCost(sc, s, a.town); n.garrisons += 1; break;
     case 'recruit':
       n.denarii -= recruitCost(sc, s); n.recruited += 1;
@@ -494,7 +530,9 @@ export interface ScoreBreakdown { glory: number; penalty: number; decree: number
 export function score(sc: Scenario, s: State): ScoreBreakdown {
   const d = decreeStatus(sc, s);
   const penalty = s.lost * sc.rules.lostLegionPenalty;
-  return { glory: s.glory, penalty, decree: d.bonus, total: s.glory - penalty + d.bonus, decreeMet: d.met };
+  // per-turn decrees pay into s.glory as they go: report that share under the decree, not the towns
+  const turnly = s.dGlory ?? 0;
+  return { glory: s.glory - turnly, penalty, decree: d.bonus + turnly, total: s.glory - penalty + d.bonus, decreeMet: d.met };
 }
 
 /** All legal actions (including 'end'). */

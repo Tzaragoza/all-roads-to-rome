@@ -24,6 +24,7 @@ async function main() {
   const b = await chromium.launch();
   const page = async (date, vp, tutorial) => {
     const p = await b.newPage({ viewport: vp, deviceScaleFactor: 2 });
+    await p.addInitScript(() => document.addEventListener('DOMContentLoaded', () => document.documentElement.setAttribute('data-nofx', ''))); // still frames: no one-shot effects
     await p.clock.setFixedTime(new Date(`${date}T12:00:00Z`));
     if (!tutorial) await p.addInitScript(() => localStorage.setItem('arlr.tutorial', 'skipped'));
     await p.goto(url); await p.waitForTimeout(900);
