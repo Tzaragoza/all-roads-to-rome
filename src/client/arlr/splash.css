@@ -68,3 +68,8 @@ h1 { margin: 0; font-family: 'Cinzel', Georgia, serif; font-weight: 800; font-si
 
 .rico { font-style:normal; margin-right:.15em; display:inline-block; line-height:1; }
 .rico.glory { color:#b8860b; -webkit-text-stroke:.4px #6b4a0a; }
+
+/* the denarius in decree text (coin.ts), as in the game */
+.dcoin { display:inline-block; width:1em; height:1em; vertical-align:-.14em; overflow:visible; }
+.dcoin circle { fill:#f2c230; stroke:#1d1409; stroke-width:1.1; }
+.dcoin text { font:bold 7px Georgia,serif; text-anchor:middle; fill:#8a5a0c; }

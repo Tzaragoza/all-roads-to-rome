@@ -1,6 +1,6 @@
 // All Roads Lead to Rome: game view (expanded post). Vanilla DOM + SVG rendered into a root element.
 import {
-  apply, budgetAsOf, checkAction, gambitOffers, townGlory, yieldMultipliers, suppliedTowns, liveEvents, shores, decreeSpec, decreeStatus, eventsAsOf, isThreat, roadToll, townValue, replay, roadCost, forecastPreview, garrisonCost, initialState, isOver, protectedTowns, recruitCost,
+  apply, budgetAsOf, checkAction, gambitOffers, townGlory, suppliedTowns, liveEvents, shores, decreeRule, decreeSpec, decreeStatus, eventsAsOf, isThreat, roadToll, townValue, replay, roadCost, forecastPreview, garrisonCost, initialState, isOver, protectedTowns, recruitCost,
   cloneState, heldAt, roadDistance, roadsCutBy, Rng, score, scoreCurve, supplied, townIncome, visibleEvents, yieldPerTurn,
 } from '../../shared/engine';
 import type { Action, Faction, GameEvent, Scenario, State, TownId } from '../../shared/engine';
@@ -17,13 +17,18 @@ import { watchSkin } from './skin';
 import { palm, ripple, dune, mesa, bigDune } from './board-egypt';
 import { COIN } from './coin';
 import { watchFit } from './fit';
+import { turnPayments } from './pay';
+import { statsScreen, wireStats } from './stats';
+import { bugSheet, bugState, wireBugSheet } from './bug';
+import type { BugContext, BugReport, BugStatus } from '../../shared/bugs';
+import type { ActMode, ModStats } from '../../shared/stats';
 import { fxActive, fxBurn, fxCoins, fxEndTurn, fxFinish, fxGarrison, fxJoin, fxMarch, fxRecruit, fxResults, fxRoad, fxSeal, fxThreat, fxSiege, fxClear, fxVote, laurelSvg, reducedMotion, fxDecreeOpen, fxDecreeStow, fxDecreeLanded, fxRaze, fxHeld, fxPinchHint, fxLastTurn, fxStreak, fxBest } from './fx';
-import type { EndTurnFx, Payment } from './fx';
+import type { EndTurnFx } from './fx';
 import { shareBlob, sharePicture, shareSvg } from './share-image';
 import { musicOn, setMusic, startMusicOnGesture } from './music';
 import { versionLabel } from './version';
 import { addDays, ballotFor, dailyScenario, prettyDate } from '../../shared/daily';
-import { ACHIEVEMENTS, ACH_BY_ID } from '../../shared/achievements';
+import { ACHIEVEMENTS, ACH_BY_ID, HIDDEN_HOW } from '../../shared/achievements';
 import { SKIRMISHES, SKIRMISH_AS_OF, skirmish } from '../../shared/skirmish';
 import type { Skirmish } from '../../shared/skirmish';
 import type { AchId, Tier } from '../../shared/achievements';
@@ -111,6 +116,8 @@ export type DayView = {
   today?: string;
   tutorialDone?: boolean;
   tutorialStats?: Record<string, number> | null;
+  /** Moderators: bug reports not yet marked done. */
+  bugsNew?: number;
   isMod?: boolean;
   rivals?: Array<{ username: string; score: number | null; rank: number | null; streak: number; curve?: number[] | null; best?: number | null; tries?: number }>;
   /** Unranked practice runs of this day: every score (newest last, capped), the best run's curve, and the total count. */
@@ -126,7 +133,7 @@ export type DayView = {
 };
 export type AchView = { earned: Array<{ id: AchId; at: number; date: string; why?: string }>; fresh: AchId[]; holders: Partial<Record<AchId, number>>; players: number };
 export type SkRecord = { best: number; curve: number[]; tries: number; at: number };
-export type SkView = { unlocked: boolean; records: Record<number, SkRecord> };
+export type SkView = { unlocked: boolean; records: Record<number, SkRecord>; achievements?: AchView | null };
 export type PracticeView = { runs: Array<{ total: number; at: number }>; best: { total: number; curve: number[]; at: number } | null; count: number };
 /** Reddit features, injected by the host page so this module stays platform-agnostic. */
 export type Social = {
@@ -141,7 +148,8 @@ export type Social = {
   subscribe(): Promise<void>;
   reset(scope: 'me' | 'day'): Promise<DayView>;
   history(): Promise<HistoryDay[]>;
-  rivalPlan?(username: string): Promise<Action[] | null>;
+  /** A rival's moves for the day (null: not marched yet), and the honours watching them earned (Speculator). */
+  rivalPlan?(username: string): Promise<{ actions: Action[] | null; fresh: AchId[] }>;
   /** Record a finished practice run (unranked). */
   practice?(actions: Action[]): Promise<DayView>;
   /** Record a finished skirmish; returns the player's skirmish records. */
@@ -152,7 +160,16 @@ export type Social = {
   journeyStatus?(): string;
   openPost(postId: string): void;
   tutorial?(event: 'start' | 'done' | 'skip', step: string): Promise<void>;
+  /** Moderator stats: the game was opened, a campaign started or finished (fire and forget). */
+  activity?(kind: 'open' | 'start' | 'finish', mode: ActMode): void;
+  /** Moderators: the Senate archives (stats.ts). */
+  modStats?(): Promise<ModStats>;
+  /** 🐞 Send a bug report (bug.ts); moderators list and close them in the Senate archives. */
+  bug?(text: string, ctx: BugContext): Promise<{ id: string }>;
+  bugs?(): Promise<BugReport[]>;
+  bugStatus?(id: string, status: BugStatus): Promise<BugReport | null>;
 };
+export type { ActMode, ModStats };
 export type HistoryDay = {
   date: string; par: number | null; postId: string | null; players: number;
   me: { total: number; late: boolean; rank: number | null } | null;
@@ -212,10 +229,10 @@ function achSparks(el: HTMLElement) {
   });
 }
 /** Mirror an award the server just made without sending back the whole day (share, tutorial). */
-function grantLocal(id: AchId) {
+function grantLocal(id: AchId, why?: string) {
   const av = day?.achievements;
   if (!av || av.earned.some((e) => e.id === id)) return;
-  av.earned.push({ id, at: Date.now(), date: new Date().toISOString().slice(0, 10) });
+  av.earned.push({ id, at: Date.now(), date: new Date().toISOString().slice(0, 10), ...(why ? { why } : {}) });
   av.holders[id] = (av.holders[id] ?? 0) + 1;
 }
 
@@ -340,12 +357,14 @@ export function mountGame(el: HTMLElement, opts: GameOptions): () => void {
     if (id === 'mus2') { music = !music; setMusic(music); render(); }
     if (id === 'reload') location.reload(); // the campaign is kept on the device: it resumes after the reload
   });
+  Object.assign(bugState, { open: false, sending: false, sent: false, error: '' });
+  wireBugSheet(root, { render: () => render(), context: bugContext, ...(opts.social?.bug ? { send: opts.social.bug } : {}) });
   sc = opts.scenario; par = opts.par; dateLabel = opts.date; demo = !!opts.day?.demo;
   s = initialState(sc); undoStack = []; msg = ''; sel = null; moving = null; lensOverride = null; rotated = null;
   social = opts.social; day = opts.day ?? null; log = []; declined = new Set(); socialMsg = ''; busy = false; shared = false; joined = false;
   seenAch = null; sk = null; view = 'map'; resumed = false; practice = false; practiceNote = null; official = null; confirmReset = null; mentionSel.clear(); rivalInput = '';
   challengedBy = opts.challengedBy ?? null;
-  history = null; historyState = 'idle';
+  history = null; historyState = 'idle'; statsOpen = false; statsData = null;
   decreeModal = false;
   if (!opts.social) say('You are playing offline: this game will not be saved or ranked. <button id="reload" class="link">Try to reconnect</button>', 12000);
   else if (challengedBy?.sk) say(`⚔️ u/${esc(challengedBy.from)} challenges you on Skirmish #${challengedBy.sk}: beat ${challengedBy.score}!${opts.day?.me ? '' : " Finish today's campaign to unlock it."}`, 9000);
@@ -396,6 +415,7 @@ export function mountGame(el: HTMLElement, opts: GameOptions): () => void {
   }) : null;
   ro?.observe($('app'));
   render();
+  social?.activity?.('open', demo ? 'demo' : 'daily'); // moderator stats: the game was opened (counted by the server, never awaited)
   if (forceTut) { startTutorial(); say('Welcome to the Demo: a two-minute guided campaign first. Skip it any time.', 6000); render(); }
   else if (goSkirmish && skUnlocked()) startSkirmish(challengedBy?.sk);
   else if (view === 'map' && !decreeModal && !tutPrompt) setTimeout(pinchHint, 900); // e.g. a resumed campaign
@@ -430,11 +450,15 @@ function tutWrongTap(step: (typeof TUT_STEPS)[number]): string {
   return step.next ? `Read this step, then tap ${step.next}.` : 'Follow the highlighted step, or skip the tutorial.';
 }
 
+/** Denarii the treasury gains (or loses) at the end of this turn: towns, base income, harvests, caravans, loan instalments. */
+const netIncome = (y: ReturnType<typeof yieldPerTurn>) => y.income + y.bonusIncome + y.purseGain - y.purseDebt;
+const signed = (n: number) => (n < 0 ? `−${-n}` : `+${n}`);
+
 /** A refusal, with what to do about it. */
 function withFix(err: string): string {
   const y = yieldPerTurn(sc, s);
   const e = err.replace(/(\d+) turn\(s\)/, (_, n: string) => pl(Number(n), 'turn'));
-  if (/costs \d+ denarii/.test(e)) return `${e}: you have ${s.denarii}, +${y.income + y.bonusIncome} at the end of this turn.`;
+  if (/costs \d+ denarii/.test(e)) return `${e}: you have ${s.denarii}, ${signed(netIncome(y))} at the end of this turn.`;
   if (e.startsWith('Roads must extend')) return `${e}: start from a town already linked to Rome.`;
   if (e.startsWith('Legions can only march along')) return `${e}: build a road to that town first.`;
   if (e.startsWith('This legion already marched')) return `${e}: it can march again next turn.`;
@@ -473,6 +497,21 @@ function pinchHint() {
 
 /** Which kind of campaign is being played, for analytics. */
 const modeName = () => (tut ? 'tutorial' : sk ? 'skirmish' : practice ? 'practice' : 'daily');
+/** 🐞 What a bug report carries besides the player's words (bug.ts): where they were, and their moves. */
+function bugContext(): BugContext {
+  let agent = '';
+  try { agent = navigator.userAgent.slice(0, 300); } catch { /* no navigator */ }
+  return {
+    version: versionLabel().slice(0, 80), day: demo ? 'demo' : dateLabel, mode: actMode(), view: statsOpen ? 'stats' : view,
+    skirmish: sk ? sk.entry.id : null, skin: boardTheme(), turn: s.turn, denarii: s.denarii, glory: s.glory,
+    screen: `${window.innerWidth}x${window.innerHeight}@${window.devicePixelRatio || 1}`, agent,
+    actions: log.length ? (log.slice(0, 600) as unknown[]) : null,
+  };
+}
+const bugSheetHtml = () => bugSheet(log.length > 0, !!day?.username);
+
+/** The mode as the moderator stats count it (the Demo post's own campaign is 'demo'). */
+const actMode = (): ActMode => (modeName() === 'daily' && demo ? 'demo' : modeName());
 const track = (action: string, details?: string) => social?.journey?.({ kind: 'interaction', action, ...(details ? { details } : {}) });
 
 function act(a: Action) {
@@ -495,12 +534,12 @@ function act(a: Action) {
   buzz(a.type === 'road' ? 12 : a.type === 'end' ? [18, 60, 18] : 20);
   const before = s;
   if (a.type === 'end') undoStack = []; else undoStack.push(s);
-  if (!log.length) social?.journey?.({ kind: 'start', mode: modeName() });
+  if (!log.length) { social?.journey?.({ kind: 'start', mode: modeName() }); social?.activity?.('start', actMode()); }
   s = apply(sc, s, a);
   log.push(a);
   persist();
   if (a.type === 'end') social?.journey?.({ kind: 'progress', progress: Math.min(1, (s.turn - 1) / sc.rules.turns), action: 'turn_end', details: `turn ${s.turn - 1}` });
-  if (isOver(sc, s)) { const b = score(sc, s); social?.journey?.({ kind: 'end', complete: true, win: par !== null && b.total >= par, score: b.total }); }
+  if (isOver(sc, s)) { const b = score(sc, s); social?.journey?.({ kind: 'end', complete: true, win: par !== null && b.total >= par, score: b.total }); social?.activity?.('finish', actMode()); }
   if (isOver(sc, s)) void finish();
   if (a.type !== 'end') play(a.type === 'camp' ? 'march' : a.type === 'accept' ? 'garrison' : a.type);
   if (a.type === 'end') {
@@ -521,9 +560,9 @@ function act(a: Action) {
     const rec = s.history[s.history.length - 1]!, fxe = endTurnFx(before, s);
     const razed = rec.burned.map((t) => ({ town: t, roads: sc.roads.filter((r) => (r.a === t || r.b === t) && before.built[r.id] && !rec.cut.includes(r.id)).map((r) => r.id) }));
     const held = new Map<number, { by: number; roads: number[]; from: number[] }>();
-    for (const h of heldAt(sc, before, before.turn)) {
-      const e = held.get(h.by) ?? { by: h.by, roads: [], from: sc.towns.filter((t) => t.tribe === h.tribe).map((t) => t.id) };
-      e.roads.push(h.road); held.set(h.by, e);
+    for (const h of heldAt(sc, before, before.turn)) { // one shield per legion or garrison that held, drawn where it stands
+      const e = held.get(h.source) ?? { by: h.source, roads: [], from: sc.towns.filter((t) => t.tribe === h.tribe).map((t) => t.id) };
+      e.roads.push(h.road); held.set(h.source, e);
     }
     const battle = rec.cut.length > 0 || held.size > 0 || razed.length > 0 || fxe.lost.length > 0;
     const sieges = sc.towns.filter((t) => (s.siege[t.id] ?? 0) > 0 && (!before.siege[t.id] || s.siege[t.id]! < before.siege[t.id]!)).map((t) => ({ town: t.id, from: before.siege[t.id] ?? 0, to: s.siege[t.id]! }));
@@ -574,25 +613,16 @@ function marchRoute(st: State, from: number, to: number): number[] {
   return path;
 }
 
-/** What the end of a turn did, for the animation: cuts, losses, and who paid what. */
+/** What the end of a turn did, for the animation: cuts, losses, and who paid what (pay.ts). */
 function endTurnFx(before: State, after: State): EndTurnFx {
   const rec = after.history[after.history.length - 1]!;
-  const supB = supplied(sc, before), supA = supplied(sc, after), mult = yieldMultipliers(sc, before.turn, before);
-  const pays: Payment[] = [];
-  let g = 0, d = 0;
-  for (const t of sc.towns) {
-    if (t.id === sc.castra || !supA[t.id]) continue;
-    const v = townValue(after, t), m = mult.get(t.tribe) ?? { glory: 1, income: 1 };
-    const pg = Math.round(townGlory(sc, t, v) * m.glory), pd = Math.round(townIncome(sc, v) * m.income);
-    pays.push({ town: t.id, glory: pg, denarii: pd, hop: t.hop }); g += pg; d += pd;
-  }
-  const dG = after.glory - before.glory, dD = after.denarii - before.denarii;
-  if (dD - d > 0) pays.push({ town: sc.castra, glory: 0, denarii: dD - d, hop: 0 }); // base income, purses
+  const supB = supplied(sc, before), supA = supplied(sc, after), { pays, extraGlory } = turnPayments(sc, before, after);
   return {
     cut: rec.cut, burned: rec.burned,
     lost: sc.towns.filter((t) => supB[t.id] && !supA[t.id] && !rec.burned.includes(t.id) && t.id !== sc.castra).map((t) => t.id),
-    pays, extraGlory: Math.max(0, dG - g),
-    counters: { glory: [before.glory, after.glory] as [number, number], denarii: [before.denarii, after.denarii] as [number, number] },
+    pays, extraGlory,
+    // after the last turn the glory counter lands on the final score (decree bonus and lost legions included), as the bar shows
+    counters: { glory: [before.glory, isOver(sc, after) ? score(sc, after).total : after.glory] as [number, number], denarii: [before.denarii, after.denarii] as [number, number] },
     tick: (i: number) => play('tick', i),
   };
 }
@@ -617,7 +647,7 @@ let tipNow = false;
 
 /** What the turn that just ended did, as one line for the status line. */
 function showTurnCard(before: State, rec: State['history'][number]) {
-  const bits: string[] = [`<b>Turn ${before.turn}:</b> +${rec.glory} glory · +${rec.income} denarii`];
+  const bits: string[] = [`<b>Turn ${before.turn}:</b> +${rec.glory} glory · ${signed(rec.income)} denarii`];
   const hit = [...new Set(liveEvents(sc, before).filter((e) => e.turn === before.turn && isThreat(e) && e.kind !== 'idus').map((e) => e.tribe))].map((t) => tribeTag(t));
   if (rec.cut.length) bits.push(`<span class="bad">⚔ ${rec.cut.length} road${rec.cut.length > 1 ? 's' : ''} cut${hit.length ? ` by ${hit.join(' ')}` : ''}</span>`);
   for (const t of rec.burned) bits.push(`<span class="bad">🔥 ${sc.towns[t]!.name} burned</span>`);
@@ -796,7 +826,11 @@ async function finishSkirmish() {
   skNote = { total, pb: prev === null || total > prev, prev };
   if (!social?.skirmish || !day?.username) { forget(); return; }
   busy = true; render();
-  try { const v = await social.skirmish(sk.entry.id, log.slice()); if (day) day.skirmish = v; socialMsg = ''; forget(); }
+  try {
+    const v = await social.skirmish(sk.entry.id, log.slice());
+    if (day) { day.skirmish = { unlocked: v.unlocked, records: v.records }; if (v.achievements) day.achievements = v.achievements; } // skirmish honours toast on the next render
+    socialMsg = ''; forget();
+  }
   catch (e) { socialMsg = (e as Error).message || 'Could not keep your skirmish score'; }
   busy = false; render();
 }
@@ -824,7 +858,7 @@ function renderSkirmish() {
       <tr><td>Decree: ${sc.decree.title}</td><td>${b.decree ? '+' + b.decree : 'missed'}</td></tr>
       <tr><td>Legions lost</td><td>${b.penalty ? '−' + b.penalty : '0'}</td></tr>
       <tr class="tot"><td>Score</td><td>${b.total}</td></tr></table>
-      <div class="muted small">Skirmishes are unranked and earn no achievements. ${done ? `You have fought ${done} of ${SKIRMISHES.length} maps.` : ''}</div>
+      <div class="muted small">Skirmishes are unranked; they earn the Skirmish honours. ${done ? `You have fought ${done} of ${SKIRMISHES.length} maps.` : ''}</div>
     </section>
     <section class="ractions">
       <button id="skretry">Retry #${e.id}</button>
@@ -835,7 +869,7 @@ function renderSkirmish() {
     </section>
     ${socialMsg ? `<div class="muted small center">${esc(socialMsg)}</div>` : ''}
   </div>
-  ${showRules ? rulesSheet() : ''}${challengeSheet()}${imgSheet()}`;
+  ${showRules ? rulesSheet() : ''}${challengeSheet()}${imgSheet()}${bugSheetHtml()}`;
   wireChart(); wireImgSheet();
   root.querySelector('#shareimg')?.addEventListener('click', () => void shareResultImage());
   if (resultsFx) { resultsFx = false; fxResults(root, (i) => play('tick', i), () => sfxLater('win', 900)); if (skNote?.pb && skNote.prev !== null) { fxBest(root, 1300); sfxLater('seal', 1500); } }
@@ -888,7 +922,11 @@ async function doFollow(name: string, follow: boolean) {
   track(follow ? 'follow' : 'unfollow');
   if (!social || busy || !name.trim()) return;
   busy = true; render();
-  try { day = await social.follow(name.trim(), follow); socialMsg = ''; if (follow) rivalInput = ''; } catch (e) { socialMsg = (e as Error).message; }
+  try {
+    day = await social.follow(name.trim(), follow); socialMsg = ''; if (follow) rivalInput = '';
+    if (follow) { const added = (day.rivals ?? []).find((r) => r.username.toLowerCase() === name.trim().replace(/^u\//i, '').toLowerCase()); if (added && slots) addToChart(added.username); }
+    historyState = 'idle'; // reload "Your record" for the rivals you follow now (the old one stays on screen meanwhile)
+  } catch (e) { socialMsg = (e as Error).message; }
   busy = false; render();
 }
 
@@ -1513,8 +1551,100 @@ function townPanel(): string {
 }
 
 // ---- results chart: score after each turn, you vs Caesar vs rivals
-const SERIES_COL = ['#2a78d6', '#eb6834', '#1baf7a', '#eda100', '#e87ba4']; // fixed order: you, Caesar, rivals 1-3 (validated)
-type Line = { name: string; curve: number[]; col: string; you?: boolean; dash?: boolean };
+// fixed order: you, Caesar, then one colour per rival *slot* (validated on the card surface #fbf6ea, dataviz validator: CVD ΔE ≥ 9.1)
+const SERIES_COL = ['#2a78d6', '#eb6834', '#1baf7a', '#eda100', '#e87ba4', '#008300'];
+type Line = { name: string; curve: number[]; col: string; you?: boolean; dash?: boolean; rival?: string };
+
+// ---- which rivals the charts draw. Both charts (Turn by turn, Your record) share one selection, kept on this device.
+// A rival sits in a fixed slot, so its colour never changes when another is hidden or added ("colour follows the entity").
+// Tapping a rival's legend chip hides it (it keeps its slot and can be tapped back on); "+ Add" searches your rivals.
+const MAX_SHOWN = 4; // past 4 rival lines (6 with You and Caesar) a chart stops being readable
+type Slot = { name: string; on: boolean } | null;
+let slots: Slot[] | null = null; // null: never chosen on this device, use the default
+let pickOpen: 'turn' | 'record' | null = null;
+const slotKey = () => `arlr.chartRivals.${day?.username ?? ''}`;
+const rivalNames = () => (day?.rivals ?? []).map((r) => r.username);
+/** Default: the best three rivals today, then those who played most in the last week. */
+function defaultSlots(): Slot[] {
+  const today = (day?.rivals ?? []).filter((r) => r.score !== null).sort((a, b) => (b.score ?? 0) - (a.score ?? 0)).map((r) => r.username);
+  const freq = new Map<string, number>();
+  for (const d of history ?? []) for (const r of d.rivals) freq.set(r.username, (freq.get(r.username) ?? 0) + 1);
+  const often = [...freq.entries()].sort((a, b) => b[1] - a[1]).map(([n]) => n);
+  const names = [...new Set([...today, ...often])].filter((n) => rivalNames().includes(n)).slice(0, 3);
+  return Array.from({ length: MAX_SHOWN }, (_, k) => (names[k] ? { name: names[k]!, on: true } : null));
+}
+/** The slots in use: the player's choice (minus rivals no longer followed), else the default. */
+function chartSlots(): Slot[] {
+  if (!slots) {
+    try { const v = JSON.parse(localStorage.getItem(slotKey()) ?? 'null') as unknown; if (Array.isArray(v) && v.length === MAX_SHOWN) slots = v as Slot[]; } catch { /* storage unavailable */ }
+  }
+  const followed = new Set(rivalNames());
+  return (slots ?? defaultSlots()).map((x) => (x && followed.has(x.name) ? x : null));
+}
+function setSlots(next: Slot[]) {
+  slots = next;
+  try { localStorage.setItem(slotKey(), JSON.stringify(next)); } catch { /* storage unavailable */ }
+}
+const slotCol = (k: number) => SERIES_COL[2 + k]!;
+/** Show a rival on the charts: a free slot, else the first hidden one. False when 4 are already shown. */
+function addToChart(name: string): boolean {
+  const cur = chartSlots();
+  if (cur.some((x) => x?.name === name)) { setSlots(cur.map((x) => (x?.name === name ? { name, on: true } : x))); return true; }
+  let k = cur.indexOf(null);
+  if (k < 0) k = cur.findIndex((x) => x && !x.on);
+  if (k < 0) return false;
+  cur[k] = { name, on: true };
+  setSlots(cur);
+  return true;
+}
+/** The legend's rival chips (tap to hide or show) and the "+ Add" search, for one chart. `drawn`: rivals that chart has data for. */
+function rivalLegend(where: 'turn' | 'record', drawn: Set<string>): string {
+  if (!day?.username || !(day.rivals ?? []).length) return '';
+  const chips = chartSlots().map((x, k) => {
+    if (!x) return '';
+    const nodata = x.on && !drawn.has(x.name);
+    return `<button type="button" class="lg rchip${x.on ? '' : ' off'}${nodata ? ' nodata' : ''}" data-chip="${esc(x.name)}" aria-pressed="${x.on}" title="${x.on ? 'Hide from the chart' : 'Show on the chart'}"><i style="background:${slotCol(k)}"></i>${esc(x.name)}${nodata ? ` <span class="muted">${where === 'turn' ? '(not played)' : '(no days)'}</span>` : ''}</button>`;
+  }).join('');
+  const more = (day.rivals ?? []).length > chartSlots().filter((x) => x?.on).length;
+  const add = more ? `<button type="button" class="lg rchip addchip" data-pickopen="${where}" aria-expanded="${pickOpen === where}">+ Add rival</button>` : '';
+  const pop = pickOpen === where ? `<div class="rpick" data-pick="${where}"><input type="search" class="rpickq" placeholder="Search your ${(day.rivals ?? []).length} rivals" autocomplete="off" maxlength="23"><div class="rpicklist"></div><div class="muted small rpicknote">Up to ${MAX_SHOWN} rivals on the charts; tap a name in the legend to hide it.</div></div>` : '';
+  return chips + add + pop;
+}
+/** Matches for the search box (rivals not shown yet first), as buttons. */
+function pickMatches(q: string): string {
+  const shown = new Set(chartSlots().filter((x) => x?.on).map((x) => x!.name));
+  const ql = q.trim().toLowerCase();
+  const list = (day?.rivals ?? []).filter((r) => !shown.has(r.username) && r.username.toLowerCase().includes(ql))
+    .sort((a, b) => (b.score ?? -1) - (a.score ?? -1) || a.username.localeCompare(b.username)).slice(0, 8);
+  if (!list.length) return `<div class="muted small">${ql ? 'No rival by that name.' : 'All your rivals are on the chart.'}</div>`;
+  return list.map((r) => `<button type="button" class="rpickrow" data-pickadd="${esc(r.username)}">${avatar(r.username)}<span class="rpn">${esc(r.username)}</span><span class="muted">${r.score !== null ? `${r.score} today` : 'not played today'}</span></button>`).join('');
+}
+function wireRivalPicker() {
+  root.querySelectorAll<HTMLButtonElement>('[data-chip]').forEach((b) => (b.onclick = () => {
+    const name = b.dataset.chip!;
+    setSlots(chartSlots().map((x) => (x?.name === name ? { name, on: !x.on } : x)));
+    render();
+  }));
+  root.querySelectorAll<HTMLButtonElement>('[data-pickopen]').forEach((b) => (b.onclick = () => {
+    const w = b.dataset.pickopen as 'turn' | 'record';
+    pickOpen = pickOpen === w ? null : w;
+    render();
+  }));
+  const box = root.querySelector<HTMLElement>('.rpick');
+  if (!box) return;
+  const q = box.querySelector<HTMLInputElement>('.rpickq')!, list = box.querySelector<HTMLElement>('.rpicklist')!;
+  // typing filters in place: a full render would drop the keyboard focus on phones
+  const fill = () => {
+    list.innerHTML = pickMatches(q.value);
+    list.querySelectorAll<HTMLButtonElement>('[data-pickadd]').forEach((b) => (b.onclick = () => {
+      if (!addToChart(b.dataset.pickadd!)) { box.querySelector('.rpicknote')!.textContent = `${MAX_SHOWN} rivals are already on the chart: tap one in the legend to hide it first.`; return; }
+      pickOpen = null; render();
+    }));
+  };
+  q.oninput = fill; fill();
+  q.onkeydown = (e) => { if (e.key === 'Escape') { pickOpen = null; render(); } };
+  q.focus({ preventScroll: true });
+}
 let chartLines: Line[] = [];
 function chartLinesFor(fin: State, myCurve?: number[]): Line[] {
   const lines: Line[] = [{ name: 'You', curve: myCurve ?? scoreCurve(sc, fin), col: SERIES_COL[0]!, you: true }];
@@ -1525,8 +1655,10 @@ function chartLinesFor(fin: State, myCurve?: number[]): Line[] {
   if (caesar) lines.push({ name: 'Caesar', curve: caesar, col: SERIES_COL[1]! });
   if (sk) return lines; // skirmish: no rivals on the chart
   const me = day?.username?.toLowerCase();
-  (day?.rivals ?? []).filter((r) => r.curve && r.username.toLowerCase() !== me).sort((a, b) => (b.score ?? 0) - (a.score ?? 0)).slice(0, 3)
-    .forEach((r, k) => lines.push({ name: esc(r.username), curve: r.curve!, col: SERIES_COL[2 + k]! }));
+  chartSlots().forEach((x, k) => {
+    const r = x?.on ? (day?.rivals ?? []).find((y) => y.username === x.name && y.curve && y.username.toLowerCase() !== me) : undefined;
+    if (r) lines.push({ name: esc(r.username), curve: r.curve!, col: slotCol(k), rival: r.username });
+  });
   return lines;
 }
 function chartSection(fin: State, myCurve?: number[]): string {
@@ -1539,7 +1671,7 @@ function chartSection(fin: State, myCurve?: number[]): string {
   const pts = (c: number[]) => [0, ...c].map((v, i) => `${X(i).toFixed(1)},${Y(v).toFixed(1)}`).join(' ');
   let g = '';
   for (let v = 0; v <= top; v += step) g += `<line x1="${L}" x2="${W - R}" y1="${Y(v)}" y2="${Y(v)}" class="grid"/><text x="${L - 6}" y="${Y(v) + 4}" class="ytick">${v}</text>`;
-  for (let i = 1; i <= T + 1; i++) g += `<text x="${X(i)}" y="${H - B + 16}" class="xtick">${i <= T ? i : 'Dusk'}</text>`;
+  for (let i = 1; i <= T + 1; i++) g += `<text x="${X(i)}" y="${H - B + 16}" class="xtick">${i <= T ? i : 'End'}</text>`;
   // losses on your line: turns where roads were cut, towns burned or legions lost
   const losses = fin.history.map((h, k) => ({ k, cut: h.cut.length, burned: h.burned.length, lost: h.lostLegions.length })).filter((x) => x.cut || x.burned || x.lost);
   for (const ln of [...lines].reverse()) g += `<polyline points="${pts(ln.curve)}" class="ln${ln.you ? ' you' : ''}${ln.dash ? ' dash' : ''}" style="stroke:${ln.col}"/>`;
@@ -1570,8 +1702,10 @@ function chartSection(fin: State, myCurve?: number[]): string {
     const what = [cut ? `${pl(cut, 'road')} cut` : '', burned ? `${pl(burned, 'town')} burned` : '', lost ? `${pl(lost, 'legion')} lost` : ''].filter(Boolean).join(', ');
     insight += ` You suffered ${what}${losses.length > 1 ? `, the worst on turn ${worstT.k + 1}` : ` on turn ${worstT.k + 1}`}.`;
   }
-  const legend = lines.map((l) => `<span class="lg"><i class="${l.dash ? 'dash' : ''}" style="${l.dash ? `border-color:${l.col}` : `background:${l.col}`}"></i>${l.name}</span>`).join('') + (losses.length ? '<span class="lg"><i class="lossk">✕</i>roads cut or towns lost</span>' : '');
-  const rows = Array.from({ length: T + 1 }, (_, i) => `<tr><td>${i < T ? i + 1 : 'Dusk'}</td>${lines.map((l) => `<td>${l.curve[i]} <span class="muted">(${(l.curve[i]! - (i ? l.curve[i - 1]! : 0)) >= 0 ? '+' : ''}${l.curve[i]! - (i ? l.curve[i - 1]! : 0)})</span></td>`).join('')}<td class="muted">${i < T ? [fin.history[i]?.cut.length ? `${fin.history[i]!.cut.length} cut` : '', fin.history[i]?.burned.length ? `${fin.history[i]!.burned.length} burned` : ''].filter(Boolean).join(', ') : ''}</td></tr>`).join('');
+  const legend = lines.filter((l) => !l.rival).map((l) => `<span class="lg"><i class="${l.dash ? 'dash' : ''}" style="${l.dash ? `border-color:${l.col}` : `background:${l.col}`}"></i>${l.name}</span>`).join('')
+    + (sk ? '' : rivalLegend('turn', new Set(lines.filter((l) => l.rival).map((l) => l.rival!))))
+    + (losses.length ? '<span class="lg"><i class="lossk">✕</i>roads cut or towns lost</span>' : '');
+  const rows = Array.from({ length: T + 1 }, (_, i) => `<tr><td>${i < T ? i + 1 : 'End'}</td>${lines.map((l) => `<td>${l.curve[i]} <span class="muted">(${(l.curve[i]! - (i ? l.curve[i - 1]! : 0)) >= 0 ? '+' : ''}${l.curve[i]! - (i ? l.curve[i - 1]! : 0)})</span></td>`).join('')}<td class="muted">${i < T ? [fin.history[i]?.cut.length ? `${fin.history[i]!.cut.length} cut` : '', fin.history[i]?.burned.length ? `${fin.history[i]!.burned.length} burned` : ''].filter(Boolean).join(', ') : ''}</td></tr>`).join('');
   return `<section class="rcard chart"><h3>Turn by turn</h3>
     <div class="lgrow2">${legend}</div>
     <div class="chartbox"><svg viewBox="0 0 ${W} ${H}" class="scorechart" role="img" aria-label="Score after each turn: ${lines.map((l) => `${l.name} ${l.curve.at(-1)}`).join(', ')}">${g}</svg><div class="tip" style="display:none"></div></div>
@@ -1590,7 +1724,7 @@ function wireChart() {
     const i = Math.max(1, Math.min(T + 1, Math.round(((x - L) * (T + 1)) / (W - L - R))));
     const cx = L + (i * (W - L - R)) / (T + 1);
     cross.setAttribute('x1', String(cx)); cross.setAttribute('x2', String(cx)); cross.style.display = '';
-    tip.innerHTML = `<b>${i <= T ? `Turn ${i}` : 'Dusk'}</b>` + chartLines.map((l) => {
+    tip.innerHTML = `<b>${i <= T ? `Turn ${i}` : 'End of the game'}</b>` + chartLines.map((l) => {
       const v = l.curve[i - 1]!, d = v - (i > 1 ? l.curve[i - 2]! : 0);
       return `<div><i style="background:${l.col}"></i>${l.name} <b>${v}</b> <span class="muted">${d >= 0 ? '+' : ''}${d}</span></div>`;
     }).join('');
@@ -1605,6 +1739,35 @@ function wireChart() {
 
 const shortDate = (d: string) => new Date(`${d}T00:00:00Z`).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', timeZone: 'UTC' });
 // ---- past campaigns: the last 7 days, and your record against Caesar and rivals
+// ---- moderators: the Senate archives (stats.ts), a screen of its own over the results page
+let statsOpen = false, statsData: ModStats | null = null, statsErr = '', bugsData: BugReport[] | null = null;
+async function openStats() {
+  statsOpen = true; statsErr = ''; render();
+  const top = $('app').scrollTop;
+  const [st, bugs] = await Promise.allSettled([social!.modStats!(), social!.bugs ? social!.bugs() : Promise.resolve(null)]);
+  if (st.status === 'fulfilled') statsData = st.value; else statsErr = (st.reason as Error)?.message || 'unknown error';
+  bugsData = bugs.status === 'fulfilled' ? bugs.value : null;
+  if (statsOpen) { render(); $('app').scrollTop = top; }
+}
+function renderStats() {
+  const keep = root.querySelector<HTMLElement>('.results.stats')?.scrollTop ?? 0;
+  const today = day?.today ?? dateLabel;
+  $('app').innerHTML = statsScreen(statsData, statsErr, today, bugsData);
+  const page = root.querySelector<HTMLElement>('.results.stats');
+  if (page && keep) page.scrollTop = keep;
+  wireStats(root, statsData, today, {
+    onBack: () => { statsOpen = false; render(); },
+    onReload: () => { statsData = null; void openStats(); },
+    rerender: () => render(),
+    copy: copyText,
+    bugs: bugsData,
+    setBug: async (id, status) => {
+      const r = await social?.bugStatus?.(id, status).catch(() => null);
+      if (r && bugsData) bugsData = bugsData.map((b) => (b.id === id ? r : b));
+      if (r && day) day = { ...day, bugsNew: Math.max(0, (day.bugsNew ?? 0) + (status === 'done' ? -1 : 1)) };
+    },
+  });
+}
 let history: HistoryDay[] | null = null;
 let historyState: 'idle' | 'loading' | 'done' | 'error' = 'idle';
 async function loadHistory() {
@@ -1618,11 +1781,10 @@ function recordChart(days: HistoryDay[]): string {
   if (asc.length < 2) return '';
   const pct = (v: number, d: HistoryDay) => Math.round((100 * v) / d.par!);
   const me = asc.map((d) => (d.me ? pct(d.me.total, d) : null));
-  const names = new Map<string, number>();
-  for (const d of asc) for (const r of d.rivals) names.set(r.username, (names.get(r.username) ?? 0) + 1);
-  const top = [...names.entries()].sort((a, b) => b[1] - a[1]).slice(0, 3).map(([n]) => n);
+  const played = new Set(asc.flatMap((d) => d.rivals.map((r) => r.username)));
+  const picked = chartSlots().map((x, k) => (x?.on && played.has(x.name) ? { n: x.name, k } : null)).filter((x): x is { n: string; k: number } => !!x);
   const lines = [{ name: 'You', col: SERIES_COL[0]!, v: me, you: true },
-    ...top.map((n, k) => ({ name: esc(n), col: SERIES_COL[2 + k]!, v: asc.map((d) => { const r = d.rivals.find((x) => x.username === n); return r ? pct(r.score, d) : null; }), you: false }))];
+    ...picked.map(({ n, k }) => ({ name: esc(n), col: slotCol(k), v: asc.map((d) => { const r = d.rivals.find((x) => x.username === n); return r ? pct(r.score, d) : null; }), you: false }))];
   const W = 420, H = 190, L = 36, R = 52, Tp = 10, B = 26;
   const all = lines.flatMap((l) => l.v.filter((x): x is number => x !== null));
   const top100 = Math.max(110, Math.ceil(Math.max(...all, 100) / 10) * 10);
@@ -1637,12 +1799,12 @@ function recordChart(days: HistoryDay[]): string {
     g += `<path d="${path}" class="ln${ln.you ? ' you' : ''}" style="stroke:${ln.col}"/>`;
     ln.v.forEach((v, i) => { if (v !== null) g += `<circle cx="${X(i)}" cy="${Y(v)}" r="${ln.you ? 4 : 3}" style="fill:${ln.col}" class="dot"><title>${ln.name}: ${v}% of Caesar on ${asc[i]!.date}</title></circle>`; });
   }
-  const legend = lines.map((l) => `<span class="lg"><i style="background:${l.col}"></i>${l.name}</span>`).join('') + '<span class="lg"><i class="cz"></i>Caesar = 100%</span>';
+  const legend = `<span class="lg"><i style="background:${SERIES_COL[0]}"></i>You</span>` + rivalLegend('record', played) + '<span class="lg"><i class="cz"></i>Caesar = 100%</span>';
   return `<div class="lgrow2">${legend}</div><svg viewBox="0 0 ${W} ${H}" class="scorechart" role="img" aria-label="Score as a percentage of Caesar's, day by day">${g}</svg>`;
 }
 function pastSection(): string {
   if (!social) return '';
-  if (historyState === 'loading' || historyState === 'idle') return '<section class="rcard past"><h3>Past campaigns</h3><div class="muted small">Unrolling the archives…</div></section>';
+  if ((historyState === 'loading' || historyState === 'idle') && !history) return '<section class="rcard past"><h3>Past campaigns</h3><div class="muted small">Unrolling the archives…</div></section>';
   if (historyState === 'error' || !history) return '';
   const days = history.filter((d) => d.date !== dateLabel || d.me);
   if (!days.length) return '';
@@ -1729,18 +1891,21 @@ function renderResults() {
     </section>
     ${socialMsg ? `<div class="muted small center">${esc(socialMsg)}${submitFailed ? ' <button id="resubmit" class="link">Retry</button>' : ''}</div>` : ''}
     ${day?.isMod ? `<section class="rcard debug"><h3>Moderator tools</h3>
+      ${social?.modStats ? `<button id="modstats" class="primary">📊 Senate archives: players, days${social.bugs ? ' and 🐞 bug reports' : ''}${day.bugsNew ? ` <span class="bugnew">${day.bugsNew} new</span>` : ''}</button>` : ''}
       <button data-reset="me" ${busy ? 'disabled' : ''}>${confirmReset === 'me' ? 'Tap again to wipe your game' : 'Reset my game today'}</button>
       <button data-reset="day" ${busy ? 'disabled' : ''}>${confirmReset === 'day' ? "Tap again to wipe everyone's" : "Reset today's whole board"}</button>
       <div class="muted small">Reset mine also clears your streak record and your tutorial status. Visible to subreddit moderators only.</div>
       ${social?.journeyStatus ? `<div class="muted small">Devvit Journeys, last receipt: <code>${esc(social.journeyStatus())}</code></div>` : ''}
       ${day.tutorialStats ? `<div class="muted small">Tutorial: ${day.tutorialStats.start ?? 0} started, ${day.tutorialStats.done ?? 0} finished, ${day.tutorialStats.skip ?? 0} skipped${(() => { const sk = Object.entries(day.tutorialStats!).filter(([k]) => k.startsWith('skip@')).sort((a, b) => b[1] - a[1])[0]; return sk ? ` (most often at "${sk[0].slice(5)}")` : ''; })()}.</div>` : ''}</section>` : ''}
+    ${social?.bug ? '<div class="center"><button id="bugopen" class="bugbtn">🐞 Report a bug</button></div>' : ''}
     <div class="ver center">${versionLabel()}</div>
   </div>
-  ${showRules ? rulesSheet() : ''}${challengeSheet()}${imgSheet()}`;
+  ${showRules ? rulesSheet() : ''}${challengeSheet()}${imgSheet()}${bugSheetHtml()}`;
   wireImgSheet();
   const page = root.querySelector<HTMLElement>('.results');
   if (page && keep) page.scrollTop = keep;
-  wireChart();
+  wireChart(); wireRivalPicker();
+  root.querySelector('#modstats')?.addEventListener('click', () => openStats());
   if (resultsFx && !staleResult) { resultsFx = false; fxResults(root, (i) => play('tick', i), () => sfxLater('win', 900)); fxStreak(root, 1300); }
   root.querySelectorAll<HTMLImageElement>('.av img').forEach((im) => { im.onerror = () => im.remove(); });
   void loadHistory();
@@ -1803,8 +1968,9 @@ async function startCompare(name: string) {
   const mine = log.length ? log : day?.me?.actions ?? [];
   busy = true; render();
   try {
-    const theirs = await social.rivalPlan(name);
+    const { actions: theirs, fresh } = await social.rivalPlan(name);
     if (!theirs) { socialMsg = `u/${name} has not marched today yet.`; return; }
+    for (const id of fresh) grantLocal(id, `Watched ${name}'s campaign turn by turn.`);
     compare = { name, mine: statesByTurn(mine), theirs: statesByTurn(theirs), k: 1 };
     view = 'map'; cam.z = 1; cam.cx = NaN;
   } catch (e) { socialMsg = `Could not load u/${name}'s campaign: ${e instanceof Error ? e.message : e}`; } finally { busy = false; render(); }
@@ -1844,7 +2010,7 @@ function renderCompare() {
   });
   const a = stat(s), b = stat(cmpRival);
   const row = (label: string, x: number | null, y: number | null) => (x === null || y === null ? '' : `<tr><td>${label}</td><td class="${x > y ? 'lead' : ''}">${x}</td><td class="${y > x ? 'lead' : ''}">${y}</td></tr>`);
-  const when = k === 0 ? 'Before the first turn' : k === T ? 'Dusk' : `After turn ${k}`;
+  const when = k === 0 ? 'Before the first turn' : k === T ? 'End of the game' : `After turn ${k}`;
   $('app').innerHTML = `
   <div class="layout">
     <section class="mapcol"><div class="mapwrap"><div class="bgslot"></div>${svg()}</div></section>
@@ -1910,6 +2076,8 @@ function achievementsSection(): string {
   const rare = (id: AchId) => { const n = av.holders[id] ?? 0; return n && av.players > 1 ? `${Math.max(1, Math.round((100 * n) / av.players))}% of generals` : ''; };
   const card = (id: AchId) => {
     const a = ACH_BY_ID[id], e = got.get(id), r = rare(id);
+    if (!e && a.hidden) return `<div class="ach locked secret" title="${attr(HIDDEN_HOW)}"><span class="medal ${a.tier} locked" aria-hidden="true"><span>?</span></span>
+      <div><b>???</b><small>${HIDDEN_HOW}</small>${r ? `<small class="rare">${r}</small>` : ''}</div></div>`;
     if (!e) return `<div class="ach locked" title="${attr(`${a.name} (${TIER_NAME[a.tier]}): ${a.how}`)}">${medal(id, true)}
       <div><b>${a.name}</b><small>${a.how}</small>${r ? `<small class="rare">${r}</small>` : ''}</div></div>`;
     // won: the rule, then how you won it (stored with the award; older honours show the rule and the date)
@@ -2028,7 +2196,7 @@ function voteBody(on: Faction[], head: string): string {
     return `<div class="dcard ${f} ${mine ? 'mine' : ''}">
       <div class="dfac">${FACTION[f].name} <span class="muted">· ${FACTION[f].motto}</span></div>
       <div class="dtitle">${d.title}</div>
-      <div class="drule">${d.text}</div>
+      <div class="drule">${decreeRule(d)}</div>
       <div class="deffect">${spec.effect}</div>
       ${bar}
     </div>`;
@@ -2208,9 +2376,9 @@ function decreeSheet(): string {
     <div class="dk">Decree of the Senate · ${sk ? `Skirmish #${sk.entry.id}` : niceDate()}</div>
     <div class="dfac">${fac}</div>
     <h2>📜 ${d.title}</h2>
-    <p class="drule">${d.text}</p>
+    <p class="drule">${decreeRule(d)}</p>
     <p class="deffect">${spec.effect}</p>
-    ${started ? `<div class="dprog">So far: ${ds.progress}${ds.bonus ? ` · <b>+${ds.bonus}</b> glory at dusk` : ''}</div>` : '<div class="dprog">The bonus is counted at dusk, after turn 10. Tap the decree banner any time to read it again.</div>'}
+    ${started ? `<div class="dprog">So far: ${ds.progress}${ds.bonus ? ` · <b>+${ds.bonus}★</b> at the end of the game` : ''}</div>` : '<div class="dprog">“Every turn, adding up” bonuses are paid at the end of each turn and add up; “at the end of the game” bonuses are paid once, after turn 10. Tap the decree banner any time to read it again.</div>'}
     <button id="decreego" class="primary">${started ? 'Back to the campaign' : 'March on Gaul'}</button>
   </div></div>`;
 }
@@ -2231,13 +2399,26 @@ function gambitLine(e: GameEvent, when: string, offers: number[]): string {
 }
 
 /** The compact layout's one-line bar above the buttons: treasury, glory, legions, decree, sound, help. */
+/** The glory counter: glory so far while playing; once the game is over, the final score (decree bonus and lost legions included). */
+const gloryShown = () => (isOver(sc, s) ? score(sc, s).total : s.glory);
+/** Lost legions are taken off at the end of the game: show it beside the glory so the final score is no surprise. */
+const lostCost = () => (!isOver(sc, s) && s.lost ? ` <small class="bad">−${s.lost * sc.rules.lostLegionPenalty}</small>` : '');
+function gloryTip(y: ReturnType<typeof yieldPerTurn>): string {
+  if (isOver(sc, s)) {
+    const b = score(sc, s);
+    return `Final score ${b.total}: ${b.glory} glory from your towns${b.decree ? ` + ${b.decree} from the decree` : ''}${b.penalty ? ` − ${b.penalty} for lost legions` : ''}.`;
+  }
+  const lost = s.lost ? ` Lost legions cost ${s.lost * sc.rules.lostLegionPenalty} at the end of the game.` : '';
+  return `Glory: ${s.glory}, +${y.glory + y.bonusGlory} at the end of this turn (after this turn's revolts).${lost}`;
+}
+
 function miniBar(y: ReturnType<typeof yieldPerTurn>, ds: ReturnType<typeof decreeStatus>, idle: number, threat: boolean): string {
-  const gain = (n: number) => (n ? `<small>+${n}</small>` : '');
+  const gain = (n: number) => (n ? `<small>${signed(n)}</small>` : '');
   const dec = ds.bonus ? `+${ds.bonus}` : s.dGlory ? `+${s.dGlory}` : '';
-  const decTip = `${sc.decree.title}: ${sc.decree.text} (${ds.progress}). Tap to read the decree.`;
+  const decTip = `${sc.decree.title}: ${decreeRule(sc.decree)} (${ds.progress}). Tap to read the decree.`;
   return `<div class="mini">
-    <span class="mstat money" data-tip="${attr(`Treasury: ${s.denarii} denarii, +${y.income + y.bonusIncome} at the end of this turn.`)}"><i class="mico coin">${COIN}</i><b data-ctr="denarii">${s.denarii}</b>${gain(y.income + y.bonusIncome)}</span>
-    <span class="mstat money" data-tip="${attr(`Glory: ${s.glory}, +${y.glory + y.bonusGlory} at the end of this turn.`)}"><i class="mico star">★</i><b data-ctr="glory">${s.glory}</b>${gain(y.glory + y.bonusGlory)}</span>
+    <span class="mstat money" data-tip="${attr(`Treasury: ${s.denarii} denarii, ${signed(netIncome(y))} at the end of this turn${y.purseDebt ? ` (${y.purseDebt} of it repays the loan)` : ''}.`)}"><i class="mico coin">${COIN}</i><b data-ctr="denarii">${s.denarii}</b>${gain(netIncome(y))}</span>
+    <span class="mstat money" data-tip="${attr(gloryTip(y))}"><i class="mico star">★</i><b data-ctr="glory">${gloryShown()}</b>${isOver(sc, s) ? '' : gain(y.glory + y.bonusGlory)}${lostCost()}</span>
     <span class="mstat${idle && threat ? ' warn' : ''}" data-tip="${attr(`${s.legions.length} legion${s.legions.length === 1 ? '' : 's'}${idle ? `, ${idle} idle at the castra${threat ? ' while a revolt looms' : ''}` : ''}.`)}">⚑ <b>${s.legions.length}</b>${idle ? `<i class="idl">${idle} idle</i>` : ''}</span>
     ${tut && tutStepId() !== 'decree' && !tutDecreeSeen ? '' : `<button id="decree" class="mdec ${sc.decree.faction}${dec ? ' on' : ''}" title="${attr(decTip)}">📜 <span class="mlabel">Decree</span>${dec ? ` <b>${dec}</b>` : ''}</button>`}
     <span class="micons">${!isTouch() ? '' : `<button id="turn" title="${sideways ? 'Back to portrait' : 'Landscape view: turn your phone sideways'}">${sideways ? PHONE_UPRIGHT : PHONE_SIDEWAYS}</button>`}<button id="snd" title="${sound ? 'Sound effects on: tap to mute' : 'Sound effects off'}">${sound ? '🔊' : '🔇'}</button><button id="mus" class="${music ? '' : 'off'}" title="${music ? 'Music on: tap to stop' : 'Music off'}">🎵</button>${sk ? '<button id="skleave" title="Leave this skirmish">🏳</button>' : ''}<button id="rules" title="How to play">?</button></span>
@@ -2337,7 +2518,7 @@ function rulesSheet(): string {
     <li><b>The Senate's decree</b> changes the day's rules or pays a bonus (📜 banner). After playing, vote for tomorrow's: the <b>Populares</b> (glory and ambition) or the <b>Optimates</b> (order and caution). Some nights the <b>Augures</b> join the ballot with a sealed decree that overturns a rule of the game.</li>
     <li><b>Score</b> = glory + Senate decree bonus − lost legions. Beat Caesar's score.</li></ul>
     <button id="tutreplay">Replay the tutorial</button>`;
-  return `<div class="sheet"><div class="sheetbox"><button id="rulesx" class="x">×</button>${tabs}${rulesTab === 'rules' ? rules : rulesTab === 'events' ? eventsSheet() : rulesTab === 'ui' ? screenSheet() : legendSheet()}<div class="sheetfoot"><button id="mus2" class="link">${music ? 'Music: on · turn off' : 'Music: off · turn on'}</button></div><div class="ver">${versionLabel()}</div></div></div>`;
+  return `<div class="sheet"><div class="sheetbox"><button id="rulesx" class="x">×</button>${tabs}${rulesTab === 'rules' ? rules : rulesTab === 'events' ? eventsSheet() : rulesTab === 'ui' ? screenSheet() : legendSheet()}<div class="sheetfoot"><button id="mus2" class="link">${music ? 'Music: on · turn off' : 'Music: off · turn on'}</button>${social?.bug ? ' · <button id="bugopen" class="link">🐞 Report a bug</button>' : ''}</div><div class="ver">${versionLabel()}</div></div></div>`;
 }
 function pickLegion(i: number) {
   if (tut && !['standard', 'march'].includes(TUT_STEPS[tut.step]!.id)) { say('Follow the highlighted step, or skip the tutorial.', 2500); render(); return; }
@@ -2353,11 +2534,11 @@ function render() {
   checkAchievements();
   tutCheck();
   if (tut && tut.step >= TUT_STEPS.length) { endTutorial('done'); return; }
+  if (statsOpen) { renderStats(); return; }
   if (view === 'results') { if (sk) renderSkirmish(); else renderResults(); return; }
   if (compare) { renderCompare(); return; }
   const over = isOver(sc, s);
-  const sup = supplied(sc, s);
-  const y = yieldPerTurn(sc, s, sup);
+  const y = yieldPerTurn(sc, s);
   const idle = s.legions.filter((p, i) => p === sc.castra && !s.moved[i]).length;
   const threat = visibleEvents(sc, s.turn, s).some(isThreat);
   lens = moving !== null ? 'military' : lensOverride ?? autoLens();
@@ -2378,19 +2559,19 @@ function render() {
     <aside class="side">
     ${compact ? '' : `<header><div class="title"><span class="ttl"><b>All Roads Lead to Rome</b> <span class="muted">· ${sk ? `Skirmish #${sk.entry.id}` : niceDate()} · ${sc.decree.faction}</span>${sk ? ' <span class="practice">skirmish</span>' : practice ? ' <span class="practice">practice</span>' : ''}</span>
       <span class="icons">${nativeWide() || !isTouch() ? '' : `<button id="turn" title="${sideways ? 'Back to portrait' : 'Landscape view: turn your phone sideways'}" aria-pressed="${sideways}">${sideways ? PHONE_UPRIGHT : PHONE_SIDEWAYS}</button>`}<button id="snd" title="${sound ? 'Sound effects on: tap to mute' : 'Sound effects off'}">${sound ? '🔊' : '🔇'}</button><button id="mus" class="${music ? '' : 'off'}" title="${music ? 'Music on: tap to stop' : 'Music off'}">🎵</button>${sk ? '<button id="skleave" title="Leave this skirmish">🏳</button>' : ''}<button id="rules" title="How to play">?</button></span></div>
-      <div class="stats">Turn <b>${Math.min(s.turn, sc.rules.turns)}/${sc.rules.turns}</b> · <span class="money"><i class="mico coin">${COIN}</i><b data-ctr="denarii">${s.denarii}</b></span> denarii <span class="muted">(+${y.income}${y.bonusIncome ? `<b class="harvest">+${y.bonusIncome}</b>` : ''}<span class="unit">/turn</span>)</span> · <span class="money"><i class="mico star">★</i><b data-ctr="glory">${s.glory}</b></span> glory <span class="muted">(+${y.glory}${y.bonusGlory ? `<b class="harvest">+${y.bonusGlory}</b>` : ''}<span class="unit">/turn</span>)</span>
+      <div class="stats">Turn <b>${Math.min(s.turn, sc.rules.turns)}/${sc.rules.turns}</b> · <span class="money"><i class="mico coin">${COIN}</i><b data-ctr="denarii">${s.denarii}</b></span> denarii <span class="muted">(+${y.income}${y.bonusIncome + y.purseGain ? `<b class="harvest">+${y.bonusIncome + y.purseGain}</b>` : ''}${y.purseDebt ? `<b class="bad" title="loan instalment">−${y.purseDebt}</b>` : ''}<span class="unit">/turn</span>)</span> · <span class="money" data-tip="${attr(gloryTip(y))}"><i class="mico star">★</i><b data-ctr="glory">${gloryShown()}</b></span> ${over ? 'final score' : `glory${lostCost()} <span class="muted">(+${y.glory}${y.bonusGlory ? `<b class="harvest">+${y.bonusGlory}</b>` : ''}<span class="unit">/turn</span>)</span>`}
         <span class="leg-inline${idle && threat && !over ? ' idlewarn' : ''}" title="${idle ? `${pl(idle, 'legion')} idle at the castra` : 'Legions'}">· ⚑ ${s.legions.length}${idle && !over ? `<span class="idletag">· ${idle} idle</span>` : ''}</span></div>
       <div class="stats legline${idle && !over ? ' idle' : ''}"><span class="legcount">⚑ ${pl(s.legions.length, 'legion')}${idle ? ' · ' : ''}</span>${idle && !over ? `<span class="${threat ? 'nudge' : 'muted'}">${idle} idle at the castra${threat ? ' while a revolt looms' : ''}</span>` : ''}</div>
       ${tut && tutStepId() !== 'decree' && !tutDecreeSeen ? '' : `<button class="decree ${sc.decree.faction}" id="decree" title="Read the Senate's decree"><b>📜 ${sc.decree.title}</b> <span class="dnow ${ds.bonus || s.dGlory ? 'on' : ''}">${ds.bonus ? `+${ds.bonus} now` : s.dGlory ? `+${s.dGlory} so far` : 'not yet'}</span>
-        <span class="dtext">${sc.decree.text} <span class="muted">(${ds.progress})</span></span><span class="dread">Read ›</span></button>`}</header>`}
-      <div class="sidebody">${over ? `<div class="overnote">Dusk has fallen on Gaul${sk ? ' (skirmish)' : practice ? ' (practice run)' : ''}. Take a last look at your roads.</div><button id="verdict" class="verdict">${sk ? 'Skirmish over · see results' : practice ? 'Practice over · see results' : busy ? 'The Senate deliberates…' : "🏛️ Hear the Senate's verdict"}</button>` : `${statusLine()}${townPanel()}<div class="forecast">${forecast()}</div>`}</div>
+        <span class="dtext">${decreeRule(sc.decree)} <span class="muted">(${ds.progress})</span></span><span class="dread">Read ›</span></button>`}</header>`}
+      <div class="sidebody">${over ? `<div class="overnote">The campaign is over${sk ? ' (skirmish)' : practice ? ' (practice run)' : ''}. Take a last look at your roads.</div><button id="verdict" class="verdict">${sk ? 'Skirmish over · see results' : practice ? 'Practice over · see results' : busy ? 'The Senate deliberates…' : "🏛️ Hear the Senate's verdict"}</button>` : `${statusLine()}${townPanel()}<div class="forecast">${forecast()}</div>`}</div>
       ${compact ? miniBar(y, ds, idle, threat) : ''}
       ${over ? '' : `<div class="bar"><button id="recruit">Recruit legion ${costTag(recruitCost(sc, s))}</button>
         <button id="undo" ${undoStack.length && !tut ? '' : 'disabled'} title="${tut ? 'Undo is off during training' : 'Take back your last move. Undo works within a turn: End turn is final.'}">Undo</button>
-        <button id="end" class="primary endbtn${confirmEnd ? ' warn' : ''}">${confirmEnd ? `<span>⚠ ${pl(forecastPreview(sc, s)?.cut.length ?? 0, 'road')} will be cut</span><small>tap again to end the turn</small>` : (s.turn === sc.rules.turns ? `<span>End the day</span><small>dusk: about ${s.glory + y.glory + y.bonusGlory} glory${decreeStatus(sc, s).bonus ? ` + ${decreeStatus(sc, s).bonus} decree` : ''}</small>` : `<span>End turn</span><small>+${y.glory + y.bonusGlory} glory · +${y.income + y.bonusIncome} denarii</small>`)}</button></div>`}
+        <button id="end" class="primary endbtn${confirmEnd ? ' warn' : ''}">${confirmEnd ? `<span>⚠ ${pl(forecastPreview(sc, s)?.cut.length ?? 0, 'road')} will be cut</span><small>tap again to end the turn</small>` : (s.turn === sc.rules.turns ? `<span>End the day</span><small>final score: about ${s.glory + y.glory + y.bonusGlory} glory${decreeStatus(sc, s).bonus ? ` + ${decreeStatus(sc, s).bonus} decree` : ''}</small>` : `<span>End turn</span><small>+${y.glory + y.bonusGlory} glory · ${signed(netIncome(y))} denarii</small>`)}</button></div>`}
     </aside>
   </div>
-    ${showRules ? rulesSheet() : ''}${decreeModal ? decreeSheet() : ''}${tutPrompt ? tutPromptSheet() : ''}`;
+    ${showRules ? rulesSheet() : ''}${decreeModal ? decreeSheet() : ''}${tutPrompt ? tutPromptSheet() : ''}${bugSheetHtml()}`;
   attachBoard();
   wireMapExtras();
   root.querySelectorAll('.coach .where').forEach((el) => (el.textContent = castraWhere()));

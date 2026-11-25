@@ -374,6 +374,28 @@ test('money-lenders: from 16 Nov the loan is paid on acceptance; earlier days ke
   expect(liveEvents(sc, s1).filter((e) => e.from === 0).map((e) => e.turn)).toEqual(Array.from({ length: LOAN.count }, (_, k) => 2 + k)); // instalments on the turns after the offer
 });
 
+test('yieldPerTurn equals the payout every turn, revolts included, and is zero once the game is over', () => {
+  // the ★ +N in the bar promised more than the turn paid whenever a revolt stranded towns (it was computed
+  // before the cuts), and kept showing +N after the last turn, when nothing more is paid
+  let cutTurns = 0;
+  for (let d = 0; d < 30; d++) {
+    const sc = generate(`pv-${d}`);
+    let s = initialState(sc);
+    while (!isOver(sc, s)) {
+      const road = sc.roads.filter((r) => !checkAction(sc, s, { type: 'road', road: r.id })).sort((a, b) => a.cost - b.cost)[0];
+      if (road) s = apply(sc, s, { type: 'road', road: road.id });
+      const y = yieldPerTurn(sc, s), n = apply(sc, s, { type: 'end' }), h = n.history[n.history.length - 1]!;
+      expect(y.glory + y.bonusGlory).toBe(h.glory);
+      expect(y.income + y.bonusIncome + y.purseGain - y.purseDebt).toBe(h.income);
+      if (h.cut.length) cutTurns++;
+      s = n;
+    }
+    const z = yieldPerTurn(sc, s);
+    expect(z.glory + z.bonusGlory + z.income + z.bonusIncome).toBe(0);
+  }
+  expect(cutTurns).toBeGreaterThan(0);
+});
+
 test('heldAt: roads saved by a legion or garrison, never ones that were cut', () => {
   let saw = 0;
   for (let d = 0; d < 40; d++) {
@@ -392,10 +414,68 @@ test('heldAt: roads saved by a legion or garrison, never ones that were cut', ()
         const r = sc.roads[h.road]!;
         expect([r.a, r.b]).toContain(h.by);
         expect(h.by).not.toBe(sc.castra);
+        // the shield is drawn where a legion or garrison actually stands, never on an empty town
+        expect(s.legions.includes(h.source) || s.garrison[h.source]).toBe(true);
+        if (h.source !== h.by) expect(s.garrison[h.source] && sc.roads.some((x) => (x.a === h.source && x.b === h.by) || (x.b === h.source && x.a === h.by))).toBe(true);
+        // an end of the road holding a unit is preferred over a merely neighbouring one
+        const unit = (t: number) => s.legions.includes(t) || s.garrison[t]!;
+        if (unit(r.a) || unit(r.b)) expect(h.source).toBe(h.by);
         saw++;
       }
       s = apply(sc, s, { type: 'end' });
     }
   }
   expect(saw).toBeGreaterThan(0);
+});
+
+test('heldAt: bug mwt689bhab (23 Nov, Augures): shields drawn on the garrisons, not on empty yellow towns', () => {
+  // The reported game: nothing was cut (correct: garrisons at 2 and 7 shield their neighbours' roads), but the
+  // "held" shield used to land on unguarded towns (10 on turn 7; 3 and 6 on turn 5, next to the garrison at 7).
+  const sc = generate('2026-11-23', { faction: 'augures', asOf: '2026-11-23' });
+  const log: Action[] = [
+    { type: 'road', road: 0 }, { type: 'road', road: 26 }, { type: 'road', road: 20 }, { type: 'camp', legion: 0, town: 12 }, { type: 'end' },
+    { type: 'road', road: 17 }, { type: 'accept', event: 0 }, { type: 'camp', legion: 0, town: 7 }, { type: 'end' },
+    { type: 'road', road: 15 }, { type: 'camp', legion: 0, town: 12 }, { type: 'end' },
+    { type: 'road', road: 16 }, { type: 'road', road: 4 }, { type: 'road', road: 8 }, { type: 'end' },
+    { type: 'garrison', town: 2 }, { type: 'road', road: 6 }, { type: 'road', road: 11 }, { type: 'end' },
+    { type: 'road', road: 5 }, { type: 'road', road: 1 }, { type: 'road', road: 23 }, { type: 'end' },
+    { type: 'road', road: 22 }, { type: 'road', road: 19 }, { type: 'road', road: 14 }, { type: 'end' },
+    { type: 'recruit' }, { type: 'camp', legion: 1, town: 4 }, { type: 'road', road: 12 }, { type: 'road', road: 10 }, { type: 'road', road: 13 }, { type: 'end' },
+    { type: 'end' }, { type: 'end' },
+  ];
+  let s = initialState(sc);
+  const sources = new Map<number, number[]>();
+  for (const a of log) {
+    if (a.type === 'end') {
+      expect(cutsAt(sc, s, s.turn)).toEqual([]);
+      const src = [...new Set(heldAt(sc, s, s.turn).map((h) => h.source))].sort((x, y) => x - y);
+      if (src.length) sources.set(s.turn, src);
+    }
+    s = apply(sc, s, a);
+  }
+  expect(score(sc, s).total).toBe(284);
+  expect(sources.get(5)).toEqual([2, 7]); // the yellow revolt broke on the two garrisons
+  expect(sources.get(7)).toEqual([2]); // the Germani broke on the garrison at 2, not on town 10
+});
+
+test('yieldPerTurn previews loan instalments and caravans exactly as the end of the turn pays them', () => {
+  const sc = line();
+  sc.events = [
+    { turn: 1, kind: 'tribute', tribe: 0, effect: { type: 'purse', denarii: -3, always: true } },
+    { turn: 1, kind: 'caravan', tribe: 1, effect: { type: 'purse', denarii: 4 } },
+  ];
+  let s = initialState(sc);
+  for (const r of [0, 1, 2]) s = apply(sc, s, { type: 'road', road: r });
+  const y = yieldPerTurn(sc, s);
+  expect([y.purseGain, y.purseDebt]).toEqual([4, 3]);
+  s = apply(sc, s, { type: 'end' });
+  expect(s.history[0]!.income).toBe(y.income + y.bonusIncome + y.purseGain - y.purseDebt);
+});
+
+test('decree rules name resources by their icons and say when they pay', () => {
+  for (const d of DECREES) {
+    const r = d.rule(typeof d.vars.param === 'number' ? d.vars.param : 5);
+    expect(r, d.kind).not.toMatch(/\b(glory|denarii|denarius|dusk)\b/i);
+    if (/★/.test(r)) expect(r, d.kind).toMatch(/At the end of the game:|Every turn, adding up:/);
+  }
 });

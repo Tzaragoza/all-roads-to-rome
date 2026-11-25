@@ -83,7 +83,7 @@ const pct = (x: number) => `${Math.round(100 * x)}%`;
 const exp = expectedCounts();
 const bench = benchmarkEvidence();
 const sampleText = (d: (typeof DECREES)[number]) =>
-  d.text(typeof d.vars.param === 'number' ? d.vars.param : 99).replace(/\b99\b/g, d.vars.param === 'maxHop' ? '*max hop*' : '*max hop − 1*');
+  d.rule(typeof d.vars.param === 'number' ? d.vars.param : 99).replace(/\b99\b/g, d.vars.param === 'maxHop' ? '*max hop*' : '*max hop − 1*');
 
 const g = DEFAULT_GEN;
 const md = `# 10 · Reference: generation, rules, events, decrees
@@ -215,7 +215,7 @@ function html(): string {
 ${list.map((d) => {
       const b = bench.byTitle.get(d.title);
       const badge = b ? `<span class="badge ${b.pass ? 'pass' : 'fail'}">${b.pass ? 'PASS' : 'FAIL'}</span> ${e(b.evidence)}` : '<span class="badge none">not benchmarked</span>';
-      const txt = e(d.text(typeof d.vars.param === 'number' ? d.vars.param : 99)).replace(/\b99\b/g, `<i>${d.vars.param === 'maxHop' ? 'max hop' : 'max hop − 1'}</i>`);
+      const txt = e(d.rule(typeof d.vars.param === 'number' ? d.vars.param : 99)).replace(/\b99\b/g, `<i>${d.vars.param === 'maxHop' ? 'max hop' : 'max hop − 1'}</i>`);
       return `<article class="card" style="border-left:4px solid ${FAC[f]}">
   <header><h4>${e(d.title)}</h4><code>${e(d.kind)}</code></header>
   <blockquote>${txt}</blockquote>

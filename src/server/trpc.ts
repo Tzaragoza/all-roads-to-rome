@@ -3,16 +3,19 @@ import { transformer } from '../shared/transformer';
 import { Context } from './context';
 import { context, reddit, redis, settings } from '@devvit/web/server';
 import { z } from 'zod';
-import { dailyScenario, dateKey, DEMO_DATE, DEMO_FACTION, DEMO_KEY, prettyDate } from '../shared/daily';
+import { addDays, dailyScenario, dateKey, DEMO_DATE, DEMO_FACTION, DEMO_KEY, prettyDate } from '../shared/daily';
 import type { DailyPostData } from '../shared/daily';
 import {
   castDemoVote, castVote, challengeLine, submitDemo, rivalPlan, getPractice, submitPractice, getAchievements, awardFor, skirmishRecords, skirmishUnlocked, submitSkirmish, avatarsFor, flairInputs, checkShare, factionFor, flairFor, followRival, GameError, resetDay, resetPlayer, rivalsFor,
   unfollowRival, getMyVote, getResult, getStreak, getVotes, historyFor, LATE_POLICIES, leaderboard, shareText,
-  recordTutorial, submitResult, tutorialDone, tutorialStats, wouldRank,
+  recordChallenges, recordTutorial, settleDay, submitResult, tutorialDone, tutorialStats, wouldRank,
 } from './core/game';
 import type { LatePolicy } from './core/game';
 import type { AchId } from '../shared/achievements';
 import { ensureTodayPost } from './core/post';
+import { ACT_KINDS, ACT_MODES, modStats, recordActivity } from './core/stats';
+import { BugLimit, listBugs, newBugCount, setBugStatus, submitBug } from './core/bugs';
+import { BUG_LIMITS } from '../shared/bugs';
 
 const t = initTRPC.context<Context>().create({ transformer });
 
@@ -96,7 +99,7 @@ async function dayState(date: string, username: string | undefined, fresh: AchId
   // an older day's post links to today's (and creates it if the scheduled job failed)
   const todayPost = demo || date < today ? await ensureTodayPost(today).catch(() => null) : null;
   return { date: demo ? DEMO_DATE : date, demo, faction, par, username: username ?? null, leaderboard: lb, votes, me, myVote, streak, today, isMod: mod, rivals,
-    policy, late: !demo && date < today, todayPost, offBoard, tutorialDone: tutorial, tutorialStats: mod ? await tutorialStats() : null, practice, achievements, skirmish, avatars };
+    policy, late: !demo && date < today, todayPost, offBoard, tutorialDone: tutorial, tutorialStats: mod ? await tutorialStats() : null, bugsNew: mod ? await newBugCount() : 0, practice, achievements, skirmish, avatars };
 }
 
 function asTrpc(e: unknown): never {
@@ -109,6 +112,8 @@ export const appRouter = t.router({
     /** Everything the splash and the game need for this post's day. */
     init: publicProcedure.query(async () => {
       const username = await reddit.getCurrentUsername();
+      // yesterday's podium (Princeps), in case the daily job did not run; once per day, never fails the load
+      await settleDay(addDays(dateKey(), -1)).catch((e) => console.warn(`settleDay failed: ${e}`));
       return dayState(await postKey(), username);
     }),
 
@@ -168,8 +173,9 @@ export const appRouter = t.router({
       .mutation(async ({ input }) => {
         const username = await reddit.getCurrentUsername();
         if (!username) throw new TRPCError({ code: 'UNAUTHORIZED', message: 'Log in to keep your skirmish scores' });
-        try { await submitSkirmish(username, input.id, input.actions, dateKey(), isDemo()); } catch (e) { asTrpc(e); }
-        return { unlocked: true, records: await skirmishRecords(username) };
+        let fresh: AchId[] = [];
+        try { fresh = (await submitSkirmish(username, input.id, input.actions, dateKey(), isDemo())).fresh; } catch (e) { asTrpc(e); }
+        return { unlocked: true, records: await skirmishRecords(username), achievements: await getAchievements(username, dateKey(), fresh) };
       }),
 
     /** A followed rival's moves for this post's day, once the player has finished it. */
@@ -189,7 +195,11 @@ export const appRouter = t.router({
         const username = await reddit.getCurrentUsername();
         if (!username) throw new TRPCError({ code: 'UNAUTHORIZED', message: 'Log in to compare' });
         const date = await postKey();
-        try { return { actions: await rivalPlan(date, username, input.username) }; } catch (e) { asTrpc(e); }
+        let actions;
+        try { actions = await rivalPlan(date, username, input.username); } catch (e) { asTrpc(e); }
+        // Speculator: watched a rival's campaign turn by turn (the client grants it locally on `fresh`)
+        const fresh = actions ? await awardFor(username, 'speculator', date === DEMO_KEY ? dateKey() : date, `Watched ${input.username}'s campaign turn by turn on ${prettyDate(date)}.`) : [];
+        return { actions, fresh };
       }),
 
     /** Post the player's spoiler-free result as a comment, as the player, optionally challenging rivals. */
@@ -203,6 +213,7 @@ export const appRouter = t.router({
         if (!st.me) throw new TRPCError({ code: 'BAD_REQUEST', message: 'Finish the campaign first' });
         let mentions: string[] = [];
         try { mentions = await checkShare(date, username, input.mentions); } catch (e) { asTrpc(e); }
+        if (date !== DEMO_KEY) await recordChallenges(date, username, mentions); // Responsum, when they march
         const text = shareText(date === DEMO_KEY ? 'Demo' : date, st.me, st.par, st.streak?.streak ?? 0, st.leaderboard.me?.rank ?? null, st.leaderboard.players, username)
           + challengeLine(mentions, username);
         await reddit.submitComment({ id: context.postId, text, runAs: 'USER' });
@@ -233,6 +244,52 @@ export const appRouter = t.router({
         else await resetDay(date);
         return dayState(date, username);
       }),
+
+    /** Game client telemetry for the moderator stats: the game was opened, a campaign started or finished. Never fails. */
+    activity: publicProcedure
+      .input(z.object({ kind: z.enum(ACT_KINDS), mode: z.enum(ACT_MODES) }))
+      .mutation(async ({ input }) => {
+        const username = await reddit.getCurrentUsername().catch(() => undefined);
+        await recordActivity(await postKey(), username, input.kind, input.mode);
+        return null;
+      }),
+
+    /** 🐞 A bug report from anyone (logged-out visitors too), with the context the client gathered. Rate-limited. */
+    bug: publicProcedure
+      .input(z.object({
+        text: z.string().trim().min(3).max(BUG_LIMITS.text),
+        ctx: z.object({
+          version: z.string().max(80), day: z.string().max(20), mode: z.string().max(20), view: z.string().max(20),
+          skirmish: z.number().int().nullable(), skin: z.string().max(20), turn: z.number().int(), denarii: z.number().int(), glory: z.number().int(),
+          screen: z.string().max(40), agent: z.string().max(300), actions: z.array(z.unknown()).max(BUG_LIMITS.actions).nullable(),
+        }),
+      }))
+      .mutation(async ({ input }) => {
+        const username = await reddit.getCurrentUsername().catch(() => undefined);
+        try { return { id: await submitBug(username, input.text, input.ctx, dateKey()) }; }
+        catch (e) { if (e instanceof BugLimit) throw new TRPCError({ code: 'TOO_MANY_REQUESTS', message: e.message }); throw e; }
+      }),
+
+    /** Moderators: the newest bug reports. */
+    bugs: publicProcedure.query(async () => {
+      if (!(await isMod(await reddit.getCurrentUsername()))) throw new TRPCError({ code: 'FORBIDDEN', message: 'Moderators only' });
+      return listBugs();
+    }),
+
+    /** Moderators: mark a report done (or new again). */
+    bugStatus: publicProcedure
+      .input(z.object({ id: z.string().max(40), status: z.enum(['new', 'done']) }))
+      .mutation(async ({ input }) => {
+        if (!(await isMod(await reddit.getCurrentUsername()))) throw new TRPCError({ code: 'FORBIDDEN', message: 'Moderators only' });
+        return setBugStatus(input.id, input.status);
+      }),
+
+    /** Moderators: every day's opens, starts, finishes and votes, and the table of known players (Senate archives). */
+    modStats: publicProcedure.query(async () => {
+      const username = await reddit.getCurrentUsername();
+      if (!(await isMod(username))) throw new TRPCError({ code: 'FORBIDDEN', message: 'Moderators only' });
+      return modStats(dateKey());
+    }),
 
     /** Your last 7 days: score, Caesar, rank and rivals, with each day's post for navigation. */
     history: publicProcedure.query(async () => {

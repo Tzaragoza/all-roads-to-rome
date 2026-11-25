@@ -16,8 +16,13 @@ export type DecreeSpec = {
   title: string;
   /** Developer variables. `param` is a threshold, `bonus` a flat or per-unit reward. */
   vars: { bonus: number; param: number | 'maxHop' | 'maxHop-1'; rules?: Partial<Rules> };
-  /** Player-facing rule text; receives the resolved param. */
+  /**
+   * Original rule text. It is stored in each generated scenario (and so in the fingerprints of published days
+   * and the Skirmish pool): never edit it. Players read `rule` instead (see `decreeRule`).
+   */
   text: (param: number) => string;
+  /** The rule as players read it (from 2026-11-19): ★ for glory, 🪙 for denarii; every reward says when it pays, once 'At the end of the game:' or 'Every turn, adding up:'. Receives the resolved param. */
+  rule: (param: number) => string;
   /** What the decree does to how people play (shown on the vote, used in docs). */
   effect: string;
   /** Metric the decree must move, and in which direction, versus the no-decree baseline. */
@@ -33,6 +38,7 @@ export const DECREES: DecreeSpec[] = [
     kind: 'triumph', faction: 'populares', title: 'Triumph at the frontier',
     vars: { bonus: 6, param: 3 },
     text: (p) => `At dusk, +6 glory for every legion standing at a town ${p}+ roads from the castra.`,
+    rule: (p) => `At the end of the game: +6★ for each legion standing at a town ${p} or more roads from the castra.`,
     effect: 'Pulls the legions forward: instead of guarding the trunk roads near the castra, they must end the day on the frontier. The core of the network is left to garrisons, or to luck.',
     target: { metric: 'legionDepth', direction: 'up' },
   },
@@ -40,6 +46,7 @@ export const DECREES: DecreeSpec[] = [
     kind: 'via', faction: 'populares', title: 'Via Militaris',
     vars: { bonus: 2, param: 0 },
     text: () => 'At dusk, +2 glory for every road in your longest unbroken road from the castra.',
+    rule: () => 'At the end of the game: +2★ for each road in your longest unbroken line of roads from the castra.',
     effect: 'Rewards long, winding roads: one serpentine route that threads through many towns beats a compact web. Long chains are full of single points of failure, so it pairs ambition with fragility.',
     target: { metric: 'longest', direction: 'up' },
   },
@@ -47,7 +54,8 @@ export const DECREES: DecreeSpec[] = [
     kind: 'marius', faction: 'populares', title: 'Marian reforms',
     vars: { bonus: 4, param: 0, rules: { recruitCost: 2, recruitCostStep: 1 } },
     text: () => 'Recruits are cheap today (2, then +1). At dusk, +4 glory for every legion still standing.',
-    effect: 'An army day: legions are cheap and each one surviving to dusk pays. Favours many mobile legions over garrisons, and punishes losing them to sieges.',
+    rule: () => 'Recruits cost 2🪙 for the first, 3🪙 for the second, 4🪙 for the third, and so on. At the end of the game: +4★ for each legion you still have.',
+    effect: 'An army day: legions are cheap and each one still standing at the end of the game pays. Favours many mobile legions over garrisons, and punishes losing them to sieges.',
     target: { metric: 'legions', direction: 'up' },
   },
   // ---- Populares, 2026-11-15
@@ -55,6 +63,7 @@ export const DECREES: DecreeSpec[] = [
     kind: 'panem', faction: 'populares', title: 'Panem et circenses', since: '2026-11-15',
     vars: { bonus: 0, param: 0, rules: { noTribute: true, baseIncome: 4 } },
     text: () => 'Bread and games, paid by the treasury: today towns pay no denarii, but the castra brings in 4 a turn instead of 2.',
+    rule: () => 'Towns pay no 🪙 today. The castra pays 4🪙 a turn instead of 2🪙.',
     effect: 'A flat budget: reaching rich cities no longer pays for the next roads, so nothing is hoarded and every denarius goes straight to glory or defence.',
     target: { metric: 'leftover', direction: 'down' },
   },
@@ -63,6 +72,7 @@ export const DECREES: DecreeSpec[] = [
     kind: 'cursus', faction: 'populares', title: 'Cursus publicus', since: '2026-11-15',
     vars: { bonus: 0, param: 4, rules: { tempoRoads: { until: 4, early: -1, late: 1 } } },
     text: (p) => `The relay posts are built: roads cost 1 less through turn ${p}, and 1 more after it.`,
+    rule: (p) => `Roads cost 1🪙 less on turns 1 to ${p}, and 1🪙 more from turn ${p + 1}.`,
     effect: 'A race: the network must be laid out in the first four turns, when roads are cheap. Turns 5–10 are for defence.',
     target: { metric: 'townsByT4', direction: 'up' },
   },
@@ -71,6 +81,7 @@ export const DECREES: DecreeSpec[] = [
     kind: 'mare', faction: 'populares', title: 'Mare Nostrum', since: '2026-11-15',
     vars: { bonus: 3, param: 0 },
     text: () => 'Our sea: every turn, +3 glory for each supplied port (a town on the sea).',
+    rule: () => 'Every turn, adding up: +3★ for each supplied port (a town on the sea).',
     effect: 'The coast first: ports pay from the turn they join, so the network runs to the sea before it runs deep.',
     target: { metric: 'portsByT5', direction: 'up' },
   },
@@ -79,6 +90,7 @@ export const DECREES: DecreeSpec[] = [
     kind: 'montes', faction: 'populares', title: 'Into the hills', since: '2026-11-15',
     vars: { bonus: 2, param: 0, rules: { roughDiscount: 1 } },
     text: () => 'Forest and hill roads cost 1 less today, and every turn each supplied forest or hill town pays +2 glory.',
+    rule: () => 'Forest and hill roads cost 1🪙 less. Every turn, adding up: +2★ for each supplied forest or hill town.',
     effect: 'The rough country first: routes go through forests and hills early instead of around them.',
     target: { metric: 'roughByT5', direction: 'up' },
   },
@@ -87,6 +99,7 @@ export const DECREES: DecreeSpec[] = [
     kind: 'legatio', faction: 'populares', title: 'Embassies', since: '2026-11-15',
     vars: { bonus: 3, param: 0 },
     text: () => 'Every tribe must feel Rome: every turn, +3 glory for each supplied town in the tribe where you hold the fewest.',
+    rule: () => 'Every turn, adding up: +3★ for each supplied town in your weakest tribe (the tribe where you hold the fewest towns).',
     effect: 'Balance over greed: the weakest tribe sets the bonus every turn, so the network spreads into all tribes from the start.',
     target: { metric: 'minTribeByT5', direction: 'up' },
   },
@@ -95,6 +108,7 @@ export const DECREES: DecreeSpec[] = [
     kind: 'devotio', faction: 'populares', title: 'Legions on campaign', since: '2026-11-15',
     vars: { bonus: 4, param: 2, rules: { legionsShield: false } },
     text: (p) => `The legions march to war, not to guard: today they shield no road. Every turn, +4 glory for each legion standing ${p}+ roads out.`,
+    rule: (p) => `Legions shield no roads today. Every turn, adding up: +4★ for each legion standing ${p} or more roads from the castra.`,
     effect: 'Troops stop defending: they campaign on the frontier for glory, and only garrisons protect the roads.',
     target: { metric: 'garrisons', direction: 'up' },
   },
@@ -103,6 +117,7 @@ export const DECREES: DecreeSpec[] = [
     kind: 'census', faction: 'populares', title: 'Census of Gaul', since: '2026-11-15',
     vars: { bonus: 3, param: 0, rules: { deepSurcharge: { hop: 3, extra: 2 } } },
     text: () => 'Count every household: roads reaching beyond 3 roads out cost +2 today. At dusk, +3 glory per supplied town.',
+    rule: () => 'Roads that reach a town 4 or more roads from the castra cost +2🪙. At the end of the game: +3★ for each supplied town.',
     effect: 'Wide instead of long: depth stops paying, so the network branches sideways instead of running one long road.',
     target: { metric: 'longest', direction: 'down' },
   },
@@ -112,6 +127,7 @@ export const DECREES: DecreeSpec[] = [
     kind: 'pax', faction: 'optimates', title: 'Pax Romana',
     vars: { bonus: 20, param: 5 },
     text: (p) => `Let no revolt or raid cut a single road all day, and supply ${p}+ towns at dusk.`,
+    rule: (p) => `At the end of the game: +20★ if none of your roads was cut all day (by anything) and ${p} or more towns are supplied.`,
     effect: 'A defensive day: every road a revolt touches must be shielded in time. Pushes players to expand only as far as their legions and garrisons can cover.',
     target: { metric: 'cuts', direction: 'down' },
   },
@@ -119,6 +135,7 @@ export const DECREES: DecreeSpec[] = [
     kind: 'nexus', faction: 'optimates', title: 'Fortified hubs',
     vars: { bonus: 3, param: 3 },
     text: (p) => `At dusk, +3 glory for every supplied town with ${p} or more of your roads.`,
+    rule: (p) => `At the end of the game: +3★ for each supplied town with ${p} or more of your roads (the castra does not count).`,
     effect: 'Rewards dense, redundant networks: towns joined by several roads. Builds resilience (fewer single points of failure) at the cost of reach.',
     target: { metric: 'hubs', direction: 'up' },
   },
@@ -126,6 +143,7 @@ export const DECREES: DecreeSpec[] = [
     kind: 'peace', faction: 'optimates', title: 'No private armies',
     vars: { bonus: 3, param: 0, rules: { maxLegions: 1, garrisonCost: 3, garrisonCostStep: 2 } },
     text: () => 'Fearing civil war, the Senate forbids new legions. Garrisons are cheap (3, then +2); +3 glory each at dusk.',
+    rule: () => 'No new legions today. Garrisons cost 3🪙 for the first, 5🪙 for the second, 7🪙 for the third, and so on. At the end of the game: +3★ for each garrison.',
     effect: 'One legion only: players must place it at a well-connected hub and lean on permanent garrisons. Shifts defence from mobility to fortification.',
     target: { metric: 'garrisons', direction: 'up' },
   },
@@ -133,6 +151,7 @@ export const DECREES: DecreeSpec[] = [
     kind: 'treasury', faction: 'optimates', title: 'Austerity',
     vars: { bonus: 2, param: 1, rules: { roadSurcharge: 1 } },
     text: () => 'Every road costs +1 today. At dusk, +2 glory for every denarius left in the treasury.',
+    rule: () => 'Every road costs +1🪙. At the end of the game: +2★ for each 🪙 left in the treasury (a debt costs 2★ per 🪙 owed).',
     effect: 'A lean day: roads are dear and coin is glory. Players connect fewer, more valuable towns and weigh every road against saving.',
     target: { metric: 'towns', direction: 'down' },
   },
@@ -141,13 +160,15 @@ export const DECREES: DecreeSpec[] = [
     kind: 'censor', faction: 'optimates', title: "The Censor's audit", since: '2026-11-15',
     vars: { bonus: 4, param: 0 },
     text: () => 'At dusk, +4 glory for every supplied town whose roads are all shielded (a legion or garrison on it or next to it).',
-    effect: 'Coverage over reach: every town should sit under a shield at dusk. Garrisons placed to cover clusters beat lone legions.',
+    rule: () => 'At the end of the game: +4★ for each supplied town under a shield (a legion on it, or a garrison on it or next to it).',
+    effect: 'Coverage over reach: every town should sit under a shield at the end of the game. Garrisons placed to cover clusters beat lone legions.',
     target: { metric: 'guarded', direction: 'up' },
   },
   {
     kind: 'limes', faction: 'optimates', title: 'Limes', since: '2026-11-15',
     vars: { bonus: 5, param: 0, rules: { garrisonDeal: { where: 'frontier', cost: 2 } } },
     text: () => 'Fortify the frontier: garrisons in frontier towns cost 2. At dusk, +5 glory for every garrisoned frontier town.',
+    rule: () => 'Garrisons in frontier towns cost 2🪙. At the end of the game: +5★ for each supplied frontier town with a garrison.',
     effect: 'A wall of forts along the mountains at the edge of the map: garrisons instead of troops, and the frontier first.',
     target: { metric: 'frontierGarrisons', direction: 'up' },
   },
@@ -155,6 +176,7 @@ export const DECREES: DecreeSpec[] = [
     kind: 'classis', faction: 'optimates', title: 'Classis', since: '2026-11-15',
     vars: { bonus: 2, param: 0, rules: { portsShield: true } },
     text: () => 'The fleet patrols the coast: supplied ports shield their roads like a legion. At dusk, +2 glory per supplied port.',
+    rule: () => 'Supplied ports shield their roads, like a legion. At the end of the game: +2★ for each supplied port.',
     effect: 'Ports defend themselves, so forts and troops are needed only inland: fewer garrisons, legions kept near home.',
     target: { metric: 'garrisons', direction: 'down' },
   },
@@ -163,6 +185,7 @@ export const DECREES: DecreeSpec[] = [
     kind: 'mos', faction: 'optimates', title: 'Mos maiorum', since: '2026-11-15',
     vars: { bonus: 3, param: 0, rules: { depthCap: { hop: 3, until: 7 } } },
     text: () => 'The ways of the ancestors: no road may reach beyond 3 roads out before turn 7. At dusk, +3 glory per supplied town within 3 roads.',
+    rule: () => 'Before turn 7, no road may reach a town more than 3 roads from the castra. At the end of the game: +3★ for each supplied town within 3 roads.',
     effect: 'A slow, sure start: the first six turns fill in the core, and the push outward waits for the end of the day.',
     target: { metric: 'deepByT6', direction: 'down' },
   },
@@ -171,6 +194,7 @@ export const DECREES: DecreeSpec[] = [
     kind: 'castella', faction: 'optimates', title: 'Castella', since: '2026-11-15',
     vars: { bonus: 4, param: 0, rules: { garrisonDeal: { where: 'rough', cost: 2 } } },
     text: () => 'Forts on the heights: garrisons in forest and hill towns cost 2. At dusk, +4 glory for every garrisoned forest or hill town.',
+    rule: () => 'Garrisons in forest and hill towns cost 2🪙. At the end of the game: +4★ for each supplied forest or hill town with a garrison.',
     effect: 'The rough country becomes the shield: cheap forts on hills and in forests guard the network instead of legions.',
     target: { metric: 'roughGarrisons', direction: 'up' },
   },
@@ -178,7 +202,8 @@ export const DECREES: DecreeSpec[] = [
     kind: 'cincinnatus', faction: 'optimates', title: 'Cincinnatus', since: '2026-11-15',
     vars: { bonus: 7, param: 0 },
     text: () => 'Return to the plough: at dusk, +7 glory for every legion standing at the castra.',
-    effect: 'Legions must come home by dusk: they defend early and leave the frontier to garrisons at the end.',
+    rule: () => 'At the end of the game: +7★ for each legion standing at the castra.',
+    effect: 'Legions must come home by the end of the game: they defend early and leave the frontier to garrisons at the end.',
     target: { metric: 'home', direction: 'up' },
   },
   // ---- Augures (green): sealed decrees, revealed only after the vote. Each one overturns a rule of the game.
@@ -186,6 +211,7 @@ export const DECREES: DecreeSpec[] = [
     kind: 'saturnalia', faction: 'augures', title: 'Saturnalia', since: '2026-11-15',
     vars: { bonus: 0, param: 0, rules: { invertTerrain: true } },
     text: () => 'The world upside down: today plains cost 2 to cross, forests and hills 1.',
+    rule: () => 'Terrain is reversed: plain roads cost 1🪙 more, forest roads 1🪙 less, hill roads 2🪙 less (never below 1🪙).',
     effect: 'Every route turns over: the hills and forests you avoided become the highways, and the open plains the obstacle.',
     target: { metric: 'roughRoads', direction: 'up' },
   },
@@ -194,6 +220,7 @@ export const DECREES: DecreeSpec[] = [
     kind: 'lupercalia', faction: 'augures', title: 'Lupercalia', since: '2026-11-15',
     vars: { bonus: 4, param: 0 },
     text: () => 'The wolves feast with you: at dusk, +4 glory for every road the tribes cut today.',
+    rule: () => 'At the end of the game: +4★ for each of your roads cut today.',
     effect: 'Losses become gains: cheap roads are built to be cut, and shielding is often the wrong move.',
     target: { metric: 'cuts', direction: 'up' },
   },
@@ -201,6 +228,7 @@ export const DECREES: DecreeSpec[] = [
     kind: 'libri', faction: 'augures', title: 'Libri Sibyllini', since: '2026-11-15',
     vars: { bonus: 0, param: 0, rules: { eventLookahead: 10 } },
     text: () => "The Sibyl's books are opened: every event of the day is foretold from turn 1, but there are half as many again, and no garrison holds against them: only legions do.",
+    rule: () => 'Every event of the day is shown from turn 1, but there are half as many again, and garrisons do not stop them: only legions do.',
     effect: 'A perfect-information puzzle with mobile defence only: the whole day is known, and the legions must be in the right place at the right turn.',
     target: { metric: 'legions', direction: 'up' },
   },
@@ -208,6 +236,7 @@ export const DECREES: DecreeSpec[] = [
     kind: 'idus', faction: 'augures', title: 'Ides of March', since: '2026-11-15',
     vars: { bonus: 4, param: 6 },
     text: (p) => `Beware the conspirators: at the end of turn ${p}, every road of your most-connected town is cut, whatever guards it. At dusk, +4 glory per supplied town with at most 2 of your roads.`,
+    rule: (p) => `At the end of turn ${p}, every road of your most-connected town is cut, even if guarded. At the end of the game: +4★ for each supplied town with 2 roads or fewer.`,
     effect: 'Hubs are a liability: the network spreads its connections so that no single town holds it together.',
     target: { metric: 'hubs', direction: 'down' },
   },
@@ -218,3 +247,6 @@ export const DECREES: DecreeSpec[] = [
 export const decreesOf = (f: Faction, date?: string) =>
   DECREES.filter((d) => d.faction === f && (date === undefined ? d.retired === undefined : (d.since ?? '') <= date && (d.retired === undefined || date < d.retired)));
 export const decreeSpec = (k: DecreeKind) => DECREES.find((d) => d.kind === k)!;
+/** The rule players read for a scenario's decree: the registry's current wording, from the decree's own param. */
+export const decreeRule = (d: { kind: DecreeKind; param: number; text: string }): string =>
+  (d.kind === 'none' ? d.text : DECREES.find((x) => x.kind === d.kind)?.rule(d.param) ?? d.text);

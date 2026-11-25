@@ -8,6 +8,11 @@ import { addDays, dailyScenario, dateKey, prettyDate } from '../shared/daily';
 import { telemetry } from '@devvit/analytics/client/reddit';
 import type { DailyPostData } from '../shared/daily';
 import type { Faction } from '../shared/engine';
+import { decreeRule } from '../shared/engine';
+import { COIN } from './arlr/coin';
+
+/** Plain text with every 🪙 drawn as the game's own coin (the emoji differs on every platform). */
+const withCoins = (t: string) => t.replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' })[c]!).replace(/🪙/g, COIN);
 import { trpc } from './trpc';
 import { versionLabel } from './arlr/version';
 import type { Action, Scenario } from '../shared/engine';
@@ -124,7 +129,7 @@ export const Splash = () => {
               {streak ? <> · 🔥 {streak}</> : null}
             </div>
           </div>
-          <div className="decsmall"><span className={`fac ${sc.decree.faction}`}>{sc.decree.faction}</span> {sc.decree.text}</div>
+          <div className="decsmall"><span className={`fac ${sc.decree.faction}`}>{sc.decree.faction}</span> <span dangerouslySetInnerHTML={{ __html: withCoins(decreeRule(sc.decree)) }} /></div>
           <div className="btns">
             <button className="play sec" onClick={open}>See your campaign</button>
             {today ? <button className="play" onClick={(e) => { try { localStorage.setItem('arlr.intent', `skirmish:${Date.now()}`); } catch { /* the game opens on the results; Skirmish is one tap there */ } open(e); }}>⚔️ Skirmish</button> : null}

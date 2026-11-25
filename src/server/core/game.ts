@@ -1,12 +1,15 @@
 // Daily game state in Redis: results, leaderboard, streaks, faction votes.
 import { reddit, redis } from '@devvit/web/server';
-import { apply, eventsAsOf, heldAt, initialState, isOver, replay, score, scoreCurve, suppliedTowns } from '../../shared/engine';
-import type { Action, Faction } from '../../shared/engine';
+import { apply, decreeRule, eventsAsOf, heldAt, initialState, isOver, replay, score, scoreCurve, suppliedTowns } from '../../shared/engine';
+import type { Action, Decree, Faction } from '../../shared/engine';
 import { addDays, ballotFor, dailyScenario, defaultFaction, DEMO_DATE, DEMO_FACTION, DEMO_KEY, prettyDate } from '../../shared/daily';
-import { ACHIEVEMENTS, counterAchievements, runAchievements, whyCounter, whyRun } from '../../shared/achievements';
-import type { AchId, Counters, RunFacts } from '../../shared/achievements';
+import {
+  ACHIEVEMENTS, CLIENTELA_FOLLOWERS, counterAchievements, fastiFor, INIMICUS_DAYS, princepsWinners, runAchievements, skirmishAchievements,
+  whyCounter, whyFasti, whyRun, whySkirmish,
+} from '../../shared/achievements';
+import type { AchId, Counters, RunFacts, SkFact } from '../../shared/achievements';
 import type { Scenario, State } from '../../shared/engine';
-import { skirmish } from '../../shared/skirmish';
+import { skirmish, SKIRMISHES } from '../../shared/skirmish';
 
 const K = {
   faction: (d: string) => `day:${d}:faction`,
@@ -21,6 +24,11 @@ const K = {
   ach: (u: string) => `user:${u}:ach`, // hash: achievement id → JSON {at, date}
   achCount: 'stats:ach', // hash: achievement id → number of holders
   sk: (u: string) => `user:${u}:sk`, // hash: skirmish map id → JSON SkRecord
+  unseen: (u: string) => `user:${u}:unseen`, // hash: achievements awarded while the player was away (another player's move, the day closing) → '1', toasted on their next visit
+  followers: (u: string) => `user:${u}:followers`, // hash: who follows u as a rival → time (the reverse of user:u:rivals)
+  rivalWins: (u: string) => `user:${u}:rivalwins`, // hash: rival → days u outscored them (fields `d:<date>:<rival>` mark a day already counted)
+  challenged: (d: string, u: string) => `day:${d}:challenged:${u}`, // hash: who challenged u in their share comment of day d → '1'
+  settled: (d: string) => `day:${d}:settled`, // set once the day's Princeps were awarded
 };
 
 // ---------------------------------------------------------------- skirmish (unranked pool maps)
@@ -33,8 +41,21 @@ export async function skirmishRecords(user: string): Promise<Record<number, SkRe
   const h = await redis.hGetAll(K.sk(user));
   return Object.fromEntries(Object.entries(h).map(([k, v]) => [Number(k), JSON.parse(v) as SkRecord]));
 }
-/** Record a finished skirmish (replay-validated): tries + personal best on that map. Earns no achievement. */
-export async function submitSkirmish(user: string, id: number, actions: Action[], today: string, demo = false): Promise<SkRecord> {
+/** What the skirmish achievements need from a player's records: best, Caesar's score and province, per map. */
+export function skFacts(records: Record<number, SkRecord>): SkFact[] {
+  return Object.entries(records).flatMap(([id, r]) => {
+    const e = SKIRMISHES.find((x) => x.id === Number(id));
+    return e ? [{ best: r.best, par: e.par, egypt: e.theme === 'egypt' }] : [];
+  });
+}
+/** Skirmish achievements from the player's records (earlier skirmishes count: it also runs on every visit). */
+async function awardSkirmish(user: string, today: string, records?: Record<number, SkRecord>): Promise<AchId[]> {
+  const facts = skFacts(records ?? await skirmishRecords(user));
+  return award(user, skirmishAchievements(facts), today, (id) => whySkirmish(id, facts, prettyDate(today)));
+}
+
+/** Record a finished skirmish (replay-validated): tries + personal best on that map, then the skirmish honours. */
+export async function submitSkirmish(user: string, id: number, actions: Action[], today: string, demo = false): Promise<SkRecord & { fresh: AchId[] }> {
   if (!(await skirmishUnlocked(user, today, demo))) throw new GameError("Finish today's campaign to unlock Skirmish");
   const sk = skirmish(id);
   if (!sk) throw new GameError('Unknown skirmish map');
@@ -46,7 +67,7 @@ export async function submitSkirmish(user: string, id: number, actions: Action[]
   const prev = raw ? (JSON.parse(raw) as SkRecord) : null;
   const rec: SkRecord = prev && prev.best >= total ? { ...prev, tries: prev.tries + 1 } : { best: total, curve: scoreCurve(sk.scenario, final), tries: (prev?.tries ?? 0) + 1, at: Date.now() };
   await redis.hSet(K.sk(user), { [String(id)]: JSON.stringify(rec) });
-  return rec;
+  return { ...rec, fresh: await awardSkirmish(user, today) };
 }
 
 // ---------------------------------------------------------------- achievements
@@ -105,6 +126,11 @@ async function counters(user: string): Promise<AchId[]> { return counterAchievem
 export async function getAchievements(user: string, date: string, fresh: AchId[] = []): Promise<AchView> {
   // earlier play (streaks, games) is credited the first time the player is seen after the feature shipped
   const backfill = await award(user, await counters(user), date, () => 'Credited from your earlier campaigns when this honour was introduced.');
+  backfill.push(...await awardSkirmish(user, date));
+  await syncFollowers(user);
+  // honours won while away (a rival marched, a challenge was answered, the day closed): toast them now, once
+  const unseen = Object.keys(await redis.hGetAll(K.unseen(user))) as AchId[];
+  if (unseen.length) { await redis.del(K.unseen(user)); backfill.push(...unseen); }
   const raw = await redis.hGetAll(K.ach(user));
   const earned = Object.entries(raw).filter(([id]) => ACHIEVEMENTS.some((a) => a.id === id))
     .map(([id, v]) => { const x = JSON.parse(v) as { at: number; date: string; why?: string }; return { id: id as AchId, at: x.at, date: x.date, ...(x.why ? { why: x.why } : {}) }; })
@@ -117,6 +143,18 @@ export async function getAchievements(user: string, date: string, fresh: AchId[]
 /** Award one achievement for an action outside a game (vote, follow, share, tutorial); never throws. */
 export async function awardFor(user: string, id: AchId, date: string, why?: string): Promise<AchId[]> {
   try { return await award(user, [id], date, () => why); } catch { return []; }
+}
+
+/**
+ * Award an achievement to a player who is not the one acting (a rival marched, the day closed): it waits
+ * in their `unseen` list and is toasted the next time they open the game. Never throws.
+ */
+export async function awardAway(user: string, id: AchId, date: string, why?: string): Promise<boolean> {
+  try {
+    const fresh = await award(user, [id], date, () => why);
+    if (fresh.length) await redis.hSet(K.unseen(user), { [id]: '1' });
+    return fresh.length > 0;
+  } catch { return false; }
 }
 
 /**
@@ -286,6 +324,10 @@ export async function submitResult(date: string, user: string, actions: Action[]
   });
   const { par } = dailyScenario(date, await factionFor(date));
   const achievements = await awardRun(user, date, runFacts(scenario, final, par, actions));
+  const fasti = fastiFor(date);
+  achievements.push(...await award(user, fasti, date, (id) => whyFasti(id, prettyDate(date))));
+  achievements.push(...await settleRivalries(date, user, result.total));
+  await answerChallenges(date, user);
   return { result, streak, fresh: true, achievements };
 }
 
@@ -412,22 +454,22 @@ export async function daySummary(date: string): Promise<DaySummary> {
 }
 const MEDAL = ['🥇', '🥈', '🥉'];
 /** The app's comment closing a day, on that day's post. Names are written without u/ so nobody is pinged. */
-export function verdictComment(d: DaySummary, nextDecree: { title: string; text: string; faction: Faction }): string {
+export function verdictComment(d: DaySummary, nextDecree: Decree): string {
   if (!d.players) return `**The Senate's verdict.** No general marched on this campaign. The next one belongs to the **${nextDecree.faction}**.`;
   const podium = d.top.map((r, i) => `${MEDAL[i]} ${r.username}: ${r.score}${d.par !== null ? ` (${r.score >= d.par ? '+' : '−'}${Math.abs(r.score - d.par)} vs Caesar)` : ''}`).join('  \n');
   const tally = (Object.entries(d.votes) as Array<[Faction, number]>).filter(([, n]) => n > 0).map(([f, n]) => `${f} ${n}`).join(', ');
   return [
     `**The Senate's verdict.** ${d.players} general${d.players > 1 ? 's' : ''} marched${d.par !== null ? `; ${d.beat} beat Caesar's ${d.par}` : ''}.`,
     '', podium, '',
-    `The vote (${tally || 'no votes'}) gave the next campaign to the **${nextDecree.faction}**. Their decree, sealed until you march: >!**${nextDecree.title}**: ${nextDecree.text}!<`,
+    `The vote (${tally || 'no votes'}) gave the next campaign to the **${nextDecree.faction}**. Their decree, sealed until you march: >!**${nextDecree.title}**: ${decreeRule(nextDecree)}!<`,
   ].join('\n');
 }
 /** The app's opening comment on a new day's post: the decree and how it was chosen. */
-export function decreeComment(decree: { title: string; text: string; faction: Faction }, prev: DaySummary | null): string {
+export function decreeComment(decree: Decree, prev: DaySummary | null): string {
   const champ = prev?.top[0];
   return [
     // the decree stays sealed until you march (the post card and the game reveal it): Reddit's spoiler tag
-    `📜 **Decree of the ${decree.faction}**, sealed until you march: >!**${decree.title}**: ${decree.text}!<`,
+    `📜 **Decree of the ${decree.faction}**, sealed until you march: >!**${decree.title}**: ${decreeRule(decree)}!<`,
     prev && prev.players ? `Chosen by yesterday's vote. Yesterday's champion: ${champ!.username} with ${champ!.score}${prev.par !== null ? ` (Caesar ${prev.par})` : ''}.` : '',
     'Finish your campaign to vote for tomorrow\'s decree, then share your result here.',
   ].filter(Boolean).join('\n\n');
@@ -442,7 +484,7 @@ export async function resetPlayer(date: string, user: string) {
   await redis.zRem(K.lb(date), [user]);
   await redis.hDel(K.late(date), [user]);
   for (const id of Object.keys(await redis.hGetAll(K.ach(user)))) await redis.hIncrBy(K.achCount, id, -1);
-  await redis.del(K.result(date, user), K.voted(date, user), K.user(user), K.practice(date, user), K.ach(user), K.sk(user));
+  await redis.del(K.result(date, user), K.voted(date, user), K.user(user), K.practice(date, user), K.ach(user), K.sk(user), K.unseen(user), K.rivalWins(user));
 }
 
 /** Wipe a whole day: every player's result and vote, the leaderboard, the tally and the decree faction. */
@@ -475,11 +517,86 @@ export async function followRival(user: string, name: string) {
   if (list.some((x) => x.toLowerCase() === r.toLowerCase())) return;
   if (list.length >= MAX_RIVALS) throw new GameError(`You can follow up to ${MAX_RIVALS} rivals`);
   await redis.hSet(rivalsKey(user), { [r]: String(Date.now()) });
-  await awardFor(user, 'socius', new Date().toISOString().slice(0, 10), `Followed ${name} as a rival.`);
+  const today = new Date().toISOString().slice(0, 10);
+  await awardFor(user, 'socius', today, `Followed ${name} as a rival.`);
+  await addFollower(r, user, today);
 }
 
 export async function unfollowRival(user: string, name: string) {
   await redis.hDel(rivalsKey(user), [norm(name)]);
+  await redis.hDel(K.followers(norm(name)), [user]);
+}
+
+/** Record that `follower` follows `rival` (the reverse index), and award Clientela at 3 followers. */
+async function addFollower(rival: string, follower: string, today: string) {
+  await redis.hSet(K.followers(rival), { [follower]: String(Date.now()) });
+  const n = await redis.hLen(K.followers(rival));
+  if (n >= CLIENTELA_FOLLOWERS) await awardAway(rival, 'clientela', today, `${n} generals follow you as their rival (the latest: ${follower}, ${prettyDate(today)}).`);
+}
+/** Follows made before the reverse index existed: register this player's rivals once (they are at most MAX_RIVALS). */
+async function syncFollowers(user: string) {
+  if (!(await redis.hSetNX(K.user(user), 'fsync', '1'))) return;
+  const today = new Date().toISOString().slice(0, 10);
+  for (const r of await getRivalNames(user)) await addFollower(r, user, today);
+}
+/** Who follows `user` as a rival. */
+export async function getFollowers(user: string): Promise<string[]> {
+  return Object.keys(await redis.hGetAll(K.followers(user)));
+}
+
+/**
+ * After `user` scored `total` on day `date`: they outscore the rivals they follow who already marched (Aemulatio,
+ * and Inimicus at INIMICUS_DAYS days against the same rival), and the generals who follow `user` and outscored
+ * them earn the same, while away. Official results only (late plays of the post too); practice never counts.
+ * Returns what `user` earned.
+ */
+export async function settleRivalries(date: string, user: string, total: number): Promise<AchId[]> {
+  const fresh: AchId[] = [];
+  const day = prettyDate(date);
+  const win = async (winner: string, loser: string, ws: number, ls: number, away: boolean) => {
+    if (!(await redis.hSetNX(K.rivalWins(winner), `d:${date}:${loser}`, '1'))) return; // this day already counted
+    const days = await redis.hIncrBy(K.rivalWins(winner), loser, 1);
+    const give = async (id: AchId, why: string) => { if (away) await awardAway(winner, id, date, why); else fresh.push(...await award(winner, [id], date, () => why)); };
+    await give('aemulatio', `Outscored your rival ${loser}, ${ws} to ${ls}, in the campaign of ${day}.`);
+    if (days >= INIMICUS_DAYS) await give('inimicus', `Outscored ${loser} for the ${days === 3 ? 'third' : `${days}th`} day, ${ws} to ${ls} on ${day}.`);
+  };
+  for (const r of await getRivalNames(user)) {
+    const theirs = await getResult(date, r);
+    if (theirs && total > theirs.total) await win(user, r, total, theirs.total, false);
+  }
+  for (const f of await getFollowers(user)) {
+    const theirs = await getResult(date, f);
+    if (theirs && theirs.total > total && (await getRivalNames(f)).includes(user)) await win(f, user, theirs.total, total, true);
+  }
+  return fresh;
+}
+
+/** `user` just marched on day `date`: everyone who challenged them that day in a share comment earns Responsum. */
+async function answerChallenges(date: string, user: string) {
+  for (const c of Object.keys(await redis.hGetAll(K.challenged(date, user)))) {
+    await awardAway(c, 'responsum', date, `${user} took up your challenge and marched on the campaign of ${prettyDate(date)}.`);
+  }
+}
+/** Remember the rivals a player challenged in their share comment of day `date`. */
+export async function recordChallenges(date: string, user: string, mentions: string[]) {
+  for (const m of mentions) await redis.hSet(K.challenged(date, m), { [user]: '1' });
+}
+
+/**
+ * Close a day for the honours: award Princeps to its top 3 (ties share, late plays excluded, at least
+ * PRINCEPS_MIN generals on time). Runs once per day (from the daily job, and lazily when a post is opened).
+ */
+export async function settleDay(date: string): Promise<string[]> {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return [];
+  if (!(await redis.hSetNX(K.settled(date), 'at', String(Date.now())))) return [];
+  const board = await redis.zRange(K.lb(date), 0, -1, { by: 'rank', reverse: true });
+  const late = new Set(Object.keys(await redis.hGetAll(K.late(date))));
+  const winners = princepsWinners(board, late);
+  for (const u of winners) {
+    const rank = 1 + board.filter((r) => !late.has(r.member) && r.score > (board.find((x) => x.member === u)?.score ?? 0)).length;
+    await awardAway(u, 'princeps', date, `Finished #${rank} of ${board.length - late.size} generals in the campaign of ${prettyDate(date)}.`);
+  }
+  return winners;
 }
 
 /**

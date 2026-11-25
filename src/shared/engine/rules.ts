@@ -144,21 +144,40 @@ export function yieldMultipliers(sc: Scenario, turn: number, s?: State): Map<num
 }
 
 /**
- * Glory and income the current network would yield at the end of this turn, split into the
- * base amount and the bonus from this turn's yield events (cuts not applied).
+ * Glory and income the end of this turn will pay, split into the base amount and the bonus from this
+ * turn's yield events and per-turn decrees. Exactly what `endTurn` pays: this turn's cuts, booms and burnings
+ * are applied first (a revolt that strands towns lowers the preview). Nothing once the game is over.
  */
-export function yieldPerTurn(sc: Scenario, s: State, sup = supplied(sc, s)) {
+export function yieldPerTurn(sc: Scenario, s: State) {
+  if (isOver(sc, s)) return { glory: 0, income: 0, bonusGlory: 0, bonusIncome: 0, purseGain: 0, purseDebt: 0, boostedTribes: new Set<number>() };
+  // paid on the network as it stands once this turn's cuts, booms and burnings have happened (as endTurn pays)
+  const { n, sup } = resolveTurn(sc, s);
   const mult = yieldMultipliers(sc, s.turn, s);
   let glory = 0, income = sc.rules.baseIncome, bonusGlory = 0, bonusIncome = 0;
   for (const t of sc.towns) {
     if (t.id === sc.castra || !sup[t.id]) continue;
-    const v = townValue(s, t), g = townGlory(sc, t, v), inc = townIncome(sc, v);
+    const v = townValue(n, t), g = townGlory(sc, t, v), inc = townIncome(sc, v);
     glory += g; income += inc;
     const m = mult.get(t.tribe);
     if (m) { bonusGlory += g * (m.glory - 1); bonusIncome += inc * (m.income - 1); }
   }
-  bonusGlory += decreeTurnGlory(sc, s, sup);
-  return { glory, income, bonusGlory, bonusIncome, boostedTribes: new Set(mult.keys()) };
+  bonusGlory += decreeTurnGlory(sc, n, sup);
+  const purse = purseAt(sc, s, sup);
+  return { glory, income, bonusGlory, bonusIncome, purseGain: purse.gain, purseDebt: purse.debt, boostedTribes: new Set(mult.keys()) };
+}
+
+/**
+ * Flat denarii due at the end of this turn (caravans, loans, loan instalments), split into what comes in and
+ * what goes out, for the network `sup` at dusk. A tribe's purse needs one of its towns supplied unless `always`.
+ */
+export function purseAt(sc: Scenario, s: State, sup: boolean[]): { gain: number; debt: number } {
+  let gain = 0, debt = 0;
+  for (const e of liveEvents(sc, s)) {
+    if (e.turn !== s.turn || e.effect.type !== 'purse') continue;
+    if (!e.effect.always && !sc.towns.some((t) => t.tribe === e.tribe && t.id !== sc.castra && sup[t.id])) continue;
+    if (e.effect.denarii >= 0) gain += e.effect.denarii; else debt -= e.effect.denarii;
+  }
+  return { gain, debt };
 }
 
 /** Hop distance along built roads from a town (Infinity if unreachable). */
@@ -257,27 +276,37 @@ export function cutsAt(sc: Scenario, s: State, turn: number): RoadId[] {
  * Roads the revolts resolving at the end of `turn` would have cut with no protection but did not:
  * what legions and garrisons saved (for the client's "held" effect; the rules never read it).
  * Only roads saved by a legion or garrison count (not the castra's or a port's standing protection).
- * `by` is the protected end of the road, where the shield is drawn; `tribe` the revolting tribe.
+ * `by` is the protected end of the road (an end holding a legion or garrison when there is one);
+ * `source` the town whose legion or garrison did the protecting, where the shield is drawn: `by` itself,
+ * or the garrison next to it (a garrison also shields its neighbours, so `source` may lie off the road).
+ * `tribe` is the revolting tribe.
  */
-export function heldAt(sc: Scenario, s: State, turn: number): Array<{ road: RoadId; by: TownId; tribe: number }> {
+export function heldAt(sc: Scenario, s: State, turn: number): Array<{ road: RoadId; by: TownId; source: TownId; tribe: number }> {
   const cut = new Set(cutsAt(sc, s, turn)), none = new Array<boolean>(sc.towns.length).fill(false);
-  // only what the player's legions and garrisons did: the castra and ports are protected by rule, not by a choice
+  // only what the player's legions and garrisons did: the castra and ports are protected by rule, not by a choice.
+  // src[t]: the town whose unit shields t (t itself when a legion or garrison stands there), -1 when unshielded
   const military = (legionsOnly: boolean) => {
-    const p = new Array<boolean>(sc.towns.length).fill(false);
-    if (sc.rules.legionsShield !== false) for (const t of s.legions) p[t] = true;
-    if (!legionsOnly) { const adj = candidateAdj(sc); for (const t of sc.towns) if (s.garrison[t.id]) { p[t.id] = true; for (const { to } of adj[t.id]!) p[to] = true; } }
-    p[sc.castra] = false;
-    return p;
+    const src = new Array<number>(sc.towns.length).fill(-1);
+    if (!legionsOnly) {
+      const adj = candidateAdj(sc);
+      for (const t of sc.towns) if (s.garrison[t.id]) for (const { to } of adj[t.id]!) if (src[to] === -1) src[to] = t.id;
+      for (const t of sc.towns) if (s.garrison[t.id]) src[t.id] = t.id;
+    }
+    if (sc.rules.legionsShield !== false) for (const t of s.legions) src[t] = t;
+    src[sc.castra] = -1;
+    return src;
   };
   const prot = military(false);
-  const out = new Map<RoadId, { road: RoadId; by: TownId; tribe: number }>();
+  const out = new Map<RoadId, { road: RoadId; by: TownId; source: TownId; tribe: number }>();
   for (const e of liveEvents(sc, s)) {
     if (e.turn !== turn || e.effect.type !== 'cut' || e.effect.pierce === 'all') continue;
-    const p = e.effect.pierce === 'garrison' ? military(true) : prot;
+    const src = e.effect.pierce === 'garrison' ? military(true) : prot;
     for (const r of roadsCutBy(sc, s, e.tribe, e.effect.mode, none, e.effect.where)) {
       if (cut.has(r) || out.has(r)) continue;
-      const road = sc.roads[r]!, by = p[road.a] ? road.a : p[road.b] ? road.b : -1;
-      if (by >= 0) out.set(r, { road: r, by, tribe: e.tribe });
+      const road = sc.roads[r]!;
+      // prefer the end where the unit actually stands, then any shielded end
+      const by = [road.a, road.b].find((t) => src[t] === t) ?? [road.a, road.b].find((t) => src[t]! >= 0);
+      if (by !== undefined) out.set(r, { road: r, by, source: src[by]!, tribe: e.tribe });
     }
   }
   return [...out.values()];
@@ -372,8 +401,11 @@ export function apply(sc: Scenario, s: State, a: Action): State {
   return n;
 }
 
-/** Resolve revolts, sieges, then glory and income. */
-export function endTurn(sc: Scenario, s: State): State {
+/**
+ * Steps 1–2 of the end of the turn (event effects, then sieges): the state and the network that the
+ * turn's glory and income are paid on. Shared by `endTurn` and `yieldPerTurn`, so the preview is the payout.
+ */
+function resolveTurn(sc: Scenario, s: State): { n: State; rec: TurnRecord; sup: boolean[] } {
   const n = cloneState(s);
   const rec: TurnRecord = { turn: s.turn, cut: [], burned: [], lostLegions: [], glory: 0, income: 0, deepest: 0, towns: 0 };
   const events = liveEvents(sc, s).filter((e) => e.turn === s.turn);
@@ -410,6 +442,13 @@ export function endTurn(sc: Scenario, s: State): State {
     rec.burned.push(t);
   }
   if (burnNow.length) sup = supplied(sc, n);
+  return { n, rec, sup };
+}
+
+/** Resolve revolts, sieges, then glory and income. */
+export function endTurn(sc: Scenario, s: State): State {
+  const { n, rec, sup } = resolveTurn(sc, s);
+  const events = liveEvents(sc, s).filter((e) => e.turn === s.turn);
 
   // 3. Glory and income from supplied towns.
   const mult = yieldMultipliers(sc, s.turn, s);
@@ -427,8 +466,9 @@ export function endTurn(sc: Scenario, s: State): State {
   const dg = decreeTurnGlory(sc, n, sup);
   if (dg) { rec.glory += dg; n.dGlory = (n.dGlory ?? 0) + dg; }
   // 4. Purses (flat denarii) and settlers (free garrisons) need the tribe supplied at dusk.
+  const purse = purseAt(sc, s, sup);
+  rec.income += purse.gain - purse.debt;
   for (const e of events) {
-    if (e.effect.type === 'purse' && (e.effect.always || sc.towns.some((t) => t.tribe === e.tribe && t.id !== sc.castra && sup[t.id]))) rec.income += e.effect.denarii;
     if (e.effect.type === 'settle' && e.town !== undefined && sup[e.town]) n.garrison[e.town] = true;
     if (e.effect.type === 'muster') for (let k = 0; k < e.effect.legions; k++) { n.legions.push(sc.castra); n.moved.push(false); }
   }
@@ -479,7 +519,7 @@ export function decreeStatus(sc: Scenario, s: State): DecreeStatus {
   const flat = (met: boolean, progress: string): DecreeStatus => ({ met, bonus: met ? d.bonus : 0, progress });
   const per = (n: number, unit: string): DecreeStatus => ({ met: n > 0, bonus: n * d.bonus, progress: `${n} ${unit}` });
   // per-turn decrees: their glory is paid each turn (see decreeTurnGlory), nothing at dusk
-  const turnly = (): DecreeStatus => ({ met: (s.dGlory ?? 0) > 0, bonus: 0, progress: `+${s.dGlory ?? 0} glory earned so far (paid every turn)` });
+  const turnly = (): DecreeStatus => ({ met: (s.dGlory ?? 0) > 0, bonus: 0, progress: `+${s.dGlory ?? 0}★ earned so far` });
   switch (d.kind) {
     case 'none': return { met: false, bonus: 0, progress: '' };
     case 'triumph': {
@@ -496,10 +536,10 @@ export function decreeStatus(sc: Scenario, s: State): DecreeStatus {
     case 'peace': return per(s.garrisons, `garrison${s.garrisons === 1 ? '' : 's'}`);
     case 'treasury': {
       const n = Math.floor(s.denarii / d.param);
-      return { met: n > 0, bonus: n * d.bonus, progress: `${s.denarii} denarii in the treasury` };
+      return { met: n > 0, bonus: n * d.bonus, progress: `${s.denarii}🪙 in the treasury` };
     }    // ---- 2026-11-15
-    case 'panem': return { met: true, bonus: 0, progress: 'towns pay no denarii; the castra pays 4 a turn' };
-    case 'cursus': return { met: true, bonus: 0, progress: s.turn <= d.param ? `roads are 1 cheaper until the end of turn ${d.param}` : 'roads cost 1 more now' };
+    case 'panem': return { met: true, bonus: 0, progress: 'towns pay no 🪙; the castra pays 4🪙 a turn' };
+    case 'cursus': return { met: true, bonus: 0, progress: s.turn <= d.param ? `roads cost 1🪙 less through turn ${d.param}` : 'roads cost 1🪙 more now' };
     case 'mare': return turnly();
     case 'montes': return turnly();
     case 'legatio': return turnly();
@@ -511,7 +551,7 @@ export function decreeStatus(sc: Scenario, s: State): DecreeStatus {
     case 'mos': { const n = held.filter((t) => sc.towns[t]!.hop <= 3).length; return per(n, `town${n === 1 ? '' : 's'} within 3 roads`); }
     case 'castella': { const n = held.filter((t) => s.garrison[t] && sc.towns[t]!.terrain !== 'plain').length; return per(n, `garrisoned forest or hill town${n === 1 ? '' : 's'}`); }
     case 'cincinnatus': { const n = s.legions.filter((t) => t === sc.castra).length; return per(n, `legion${n === 1 ? '' : 's'} home at the castra`); }
-    case 'saturnalia': return { met: true, bonus: 0, progress: 'plains cost 3, forests 2, hills 1' };
+    case 'saturnalia': return { met: true, bonus: 0, progress: 'plain roads +1🪙, forest −1🪙, hills −2🪙' };
     case 'lupercalia': { const n = s.history.reduce((k, h) => k + h.cut.length, 0); return per(n, `road${n === 1 ? '' : 's'} cut so far`); }
     case 'libri': return { met: true, bonus: 0, progress: 'every event is foretold' };
     case 'idus': {

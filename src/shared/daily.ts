@@ -8,6 +8,8 @@ type SeasonEntry = { date: string; seed: string; par: Partial<Record<Faction, nu
 const SEASON: SeasonEntry[] = season as SeasonEntry[];
 
 export const dateKey = (d: Date = new Date()) => d.toISOString().slice(0, 10);
+/** The first day of the season (the first published daily). */
+export const SEASON_START = SEASON[0]!.date;
 
 export function addDays(date: string, n: number): string {
   return dateKey(new Date(Date.parse(`${date}T00:00:00Z`) + n * 864e5));

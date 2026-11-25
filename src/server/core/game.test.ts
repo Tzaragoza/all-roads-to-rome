@@ -6,7 +6,9 @@ import { addDays, augurBallot, dailyScenario } from '../../shared/daily';
 import {
   castVote, factionFor, flairFor, getResult, getStreak, getVotes, historyFor, leaderboard, nextStreak, recordTutorial, shareText, submitResult,
   tutorialDone, tutorialStats, rivalPlan, followRival, getPractice, submitPractice, personalBest, rivalsFor, getAchievements, resetPlayer, submitSkirmish, skirmishRecords,
+  settleDay, recordChallenges, unfollowRival, getFollowers, skFacts,
 } from './game';
+import { fastiFor, princepsWinners, skirmishAchievements, ACHIEVEMENTS } from '../../shared/achievements';
 
 const DATE = '2026-11-20';
 const ON = { today: DATE, policy: 'flagged' as const };
@@ -256,7 +258,7 @@ test('achievements: awarded once with their date, from runs, counters, votes and
   expect(after.holders.hastatus ?? 0).toBe(0);
 });
 
-test('skirmish: locked until today is played, then best and tries per map, no achievements', async () => {
+test('skirmish: locked until today is played, then best and tries per map; the first one earns Peregrinus', async () => {
   const { skirmish, SKIRMISHES } = await import('../../shared/skirmish');
   if (!SKIRMISHES.length) return;
   const sk = skirmish(1)!;
@@ -275,7 +277,11 @@ test('skirmish: locked until today is played, then best and tries per map, no ac
   expect((await skirmishRecords('vibia'))[1]?.tries).toBe(2);
   await expect(submitSkirmish('vibia', 99999, play('s1'), DATE)).rejects.toThrow(/Unknown/);
   await expect(submitSkirmish('vibia', 1, play('s1').slice(0, 2), DATE)).rejects.toThrow(/not finished/);
-  expect((await getAchievements('vibia', DATE)).earned.length).toBe(before);
+  const after = (await getAchievements('vibia', DATE)).earned.map((e) => e.id);
+  expect(after.length).toBe(before + 1 + (sk.entry.theme === 'egypt' ? 1 : 0)); // Peregrinus (and Ad Nilum on a Nile map)
+  expect(after).toContain('peregrinus');
+  expect(r1.fresh).toContain('peregrinus');
+  expect(r2.fresh).not.toContain('peregrinus'); // once
 });
 
 test("the Senate's verdict and decree comments: podium, Caesar, vote, and no u/ pings", async () => {
@@ -290,7 +296,7 @@ test("the Senate's verdict and decree comments: podium, Caesar, vote, and no u/ 
   expect(sum.players).toBe(4);
   expect(sum.top.length).toBe(3);
   expect(sum.top[0]!.score).toBeGreaterThanOrEqual(sum.top[2]!.score);
-  const next = { title: 'Pax Romana', text: 'Lose no road.', faction: 'optimates' as const };
+  const next = { kind: 'pax' as const, title: 'Pax Romana', text: 'Lose no road.', faction: 'optimates' as const, param: 5, bonus: 20 };
   const v = verdictComment(sum, next);
   expect(v).toContain('4 generals marched');
   expect(v).toContain('🥇');
@@ -299,6 +305,7 @@ test("the Senate's verdict and decree comments: podium, Caesar, vote, and no u/ 
   const c = decreeComment(next, sum);
   expect(c).toContain('Pax Romana');
   expect(c).toMatch(/>!\*\*Pax Romana\*\*/); // sealed: Reddit spoiler tag around the decree
+  expect(c).toContain('none of your roads was cut'); // the current wording (decreeRule), not the text stored in the scenario
   expect(c).toContain(`champion: ${sum.top[0]!.username}`);
   expect(c).not.toMatch(/u\//);
   expect(verdictComment({ ...sum, players: 0, top: [] }, next)).toContain('No general marched');
@@ -393,4 +400,132 @@ test('a Demo run unlocks Skirmish only on the Demo post', async () => {
   await expect(submitSkirmish('gus', 1, acts, DATE)).rejects.toThrow(/unlock/);
   await submitSkirmish('gus', 1, acts, DATE, true);
   expect((await skirmishRecords('gus'))[1]?.tries).toBe(1);
+});
+
+// ---------------------------------------------------------------- the 15 honours of 25 Nov 2026 (Forum, Skirmish, Fasti)
+
+/** Games recorded by distinctScores, by the name they were drawn for. */
+const LOGS: Record<string, Action[]> = {};
+const logOf = (name: string) => LOGS[name]!;
+/** One finished game per name for `date`, all with different scores; returns the names, best first. */
+async function distinctScores(names: string[], date = DATE): Promise<Array<[string, number]>> {
+  const { scenario } = dailyScenario(date, await factionFor(date));
+  const out: Array<[string, number]> = [];
+  for (const u of names) {
+    for (let k = 0; ; k++) {
+      const log = await playRandom(`${u}-${k}`, date), t = score(scenario, replay(scenario, log)).total;
+      if (out.some(([, x]) => x === t)) continue;
+      out.push([u, t]); LOGS[u] = log; break;
+    }
+  }
+  return out.sort((a, b) => b[1] - a[1]);
+}
+
+test('Aemulatio and Inimicus: outscore a followed rival (whoever marches first), the same rival on 3 days', async () => {
+  await followRival('lucia', 'marcus');
+  const days = [DATE, addDays(DATE, 1), addDays(DATE, 2)];
+  for (const [k, d] of days.entries()) {
+    const ranked = await distinctScores([`hi${k}`, `lo${k}`], d), hi = ranked[0]![0], lo = ranked[1]![0];
+    const play = (u: string, from: string) => submitResult(d, u, logOf(from), { today: d, policy: 'flagged' });
+    if (k % 2 === 0) { // lucia marches first: she earns it when marcus marches (while away)
+      await play('lucia', hi); await play('marcus', lo);
+    } else { // lucia marches second: she earns it on her own submission
+      await play('marcus', lo);
+      const r = await play('lucia', hi);
+      expect(r.achievements).not.toContain('aemulatio'); // held since day 1
+    }
+    const has = (await getAchievements('lucia', d)).earned.map((e) => e.id);
+    expect(has).toContain('aemulatio');
+    expect(has.includes('inimicus')).toBe(k === 2);
+  }
+  // marcus never outscored lucia (and does not follow her)
+  expect((await getAchievements('marcus', days[2]!)).earned.map((e) => e.id)).not.toContain('aemulatio');
+});
+
+test('Aemulatio: earned while away is toasted once on the next visit; practice and ties never count', async () => {
+  const ranked = await distinctScores(['h', 'l']), hi = ranked[0]![0], lo = ranked[1]![0];
+  await followRival('tullia', 'gaius');
+  await submitResult(DATE, 'tullia', logOf(hi), ON); // gaius has not marched: nothing yet
+  expect((await getAchievements('tullia', DATE)).earned.map((e) => e.id)).not.toContain('aemulatio');
+  await submitResult(DATE, 'gaius', logOf(lo), ON); // now tullia (away) has outscored him
+  const v1 = await getAchievements('tullia', DATE);
+  expect(v1.earned.map((e) => e.id)).toContain('aemulatio');
+  expect(v1.fresh).toContain('aemulatio');
+  expect((await getAchievements('tullia', DATE)).fresh).not.toContain('aemulatio'); // toasted once
+  // practice runs never count
+  await followRival('quintus', 'gaius');
+  await submitResult(DATE, 'quintus', logOf(lo), ON); // the same game: a tie
+  await submitPractice(DATE, 'quintus', logOf(hi), DATE);
+  expect((await getAchievements('quintus', DATE)).earned.map((e) => e.id)).not.toContain('aemulatio');
+});
+
+test('Clientela: three followers; the reverse index follows unfollows', async () => {
+  for (const f of ['f1', 'f2']) await followRival(f, 'patronus');
+  expect((await getAchievements('patronus', DATE)).earned.map((e) => e.id)).not.toContain('clientela');
+  await unfollowRival('f2', 'patronus');
+  expect(await getFollowers('patronus')).toEqual(['f1']);
+  for (const f of ['f2', 'f3']) await followRival(f, 'patronus');
+  const v = await getAchievements('patronus', DATE);
+  expect(v.earned.find((e) => e.id === 'clientela')?.why).toMatch(/3 generals follow you/);
+  expect(v.fresh).toContain('clientela');
+});
+
+test('Responsum: the challenger earns it when the challenged rival marches that day', async () => {
+  await recordChallenges(DATE, 'claudia', ['decimus']);
+  expect((await getAchievements('claudia', DATE)).earned.map((e) => e.id)).not.toContain('responsum');
+  await submitResult(DATE, 'decimus', await playRandom('dx'), ON);
+  const v = await getAchievements('claudia', DATE);
+  expect(v.earned.find((e) => e.id === 'responsum')?.why).toMatch(/decimus took up your challenge/);
+});
+
+test('Princeps: top 3 when the day closes, ties share, late plays excluded, 20 on time needed, once', () => {
+  const board = (n: number) => Array.from({ length: n }, (_, i) => ({ member: `p${i}`, score: 300 - i }));
+  expect(princepsWinners(board(19), new Set())).toEqual([]);
+  expect(princepsWinners(board(20), new Set())).toEqual(['p0', 'p1', 'p2']);
+  expect(princepsWinners(board(21), new Set(['p0']))).toEqual(['p1', 'p2', 'p3']); // a late play takes no place
+  expect(princepsWinners(board(20), new Set(['p0']))).toEqual([]); // and does not count toward the 20
+  const tied = board(20); tied[3]!.score = tied[2]!.score;
+  expect(princepsWinners(tied, new Set())).toEqual(['p0', 'p1', 'p2', 'p3']);
+});
+
+test('Princeps: settleDay awards the podium once, while away', async () => {
+  const d = addDays(DATE, 5);
+  const few = await settleDay(addDays(DATE, 6)); // nobody marched
+  expect(few).toEqual([]);
+  for (let i = 0; i < 20; i++) await submitResult(d, `g${i}`, await playRandom(`g${i}`, d), { today: d, policy: 'flagged' });
+  const winners = await settleDay(d);
+  expect(winners.length).toBeGreaterThanOrEqual(3);
+  expect(await settleDay(d)).toEqual([]); // once
+  const v = await getAchievements(winners[0]!, d);
+  expect(v.fresh).toContain('princeps');
+  expect(v.earned.find((e) => e.id === 'princeps')?.why).toMatch(/^Finished #1 of 20 generals/);
+});
+
+test('Fasti: the date of the daily decides (late plays of that post count), never practice or the Demo', async () => {
+  expect(fastiFor('2027-03-15')).toEqual(['idus']);
+  expect(fastiFor('2026-12-17')).toEqual(['saturnalia']);
+  expect(fastiFor('2026-12-23')).toEqual(['saturnalia']);
+  expect(fastiFor('2026-12-24')).toEqual([]);
+  expect(fastiFor('2027-01-01')).toEqual(['kalendae']);
+  expect(fastiFor('2027-04-21')).toEqual(['abUrbe']);
+  expect(fastiFor('demo')).toEqual([]);
+  const sat = '2026-12-20';
+  await submitPractice(sat, 'saturninus', await playRandom('sp', sat), sat);
+  expect((await getAchievements('saturninus', sat)).earned.map((e) => e.id)).not.toContain('saturnalia');
+  const r = await submitResult(sat, 'saturninus', await playRandom('sr', sat), { today: addDays(sat, 3), policy: 'flagged' }); // a late play
+  expect(r.achievements).toContain('saturnalia');
+  expect(ACHIEVEMENTS.filter((a) => a.hidden).map((a) => a.id)).toEqual(['idus', 'saturnalia', 'kalendae', 'abUrbe']);
+});
+
+test('Skirmish honours come from the records: Ad Nilum, Explorator, Utraque provincia, Triumphator', () => {
+  const m = (best: number, par: number, egypt = false) => ({ best, par, egypt });
+  expect(skirmishAchievements([])).toEqual([]);
+  expect(skirmishAchievements([m(10, 20)])).toEqual(['peregrinus']);
+  expect(skirmishAchievements([m(10, 20, true)])).toEqual(['peregrinus', 'adNilum']);
+  expect(skirmishAchievements([m(20, 20), m(30, 20, true)])).toContain('utraque');
+  expect(skirmishAchievements([m(20, 20), m(10, 20, true)])).not.toContain('utraque');
+  const ten = Array.from({ length: 10 }, () => m(25, 20));
+  expect(skirmishAchievements(ten)).toEqual(expect.arrayContaining(['explorator', 'triumphator']));
+  expect(skirmishAchievements(ten.slice(1))).not.toContain('explorator');
+  expect(skFacts({ 99999: { best: 1, curve: [], tries: 1, at: 0 } })).toEqual([]); // unknown maps are ignored
 });

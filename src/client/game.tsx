@@ -86,9 +86,14 @@ const social: Social = {
   journey,
   journeyStatus: () => lastReceipt,
   practice: async (actions) => toView(await trpc.day.practice.mutate({ actions })),
-  rivalPlan: async (username) => (await trpc.day.rivalPlan.query({ username }))?.actions ?? null,
+  rivalPlan: async (username) => { const r = await trpc.day.rivalPlan.query({ username }); return { actions: r?.actions ?? null, fresh: r?.fresh ?? [] }; },
   openPost: (postId) => { navigateToPost(postId as `t3_${string}`, { presentation: 'expanded' }); },
   tutorial: async (event, step) => { await trpc.day.tutorial.mutate({ event, step }); },
+  activity: (kind, mode) => { void trpc.day.activity.mutate({ kind, mode }).catch(() => undefined); },
+  modStats: async () => trpc.day.modStats.query(),
+  bug: async (text, ctx) => trpc.day.bug.mutate({ text, ctx }),
+  bugs: async () => trpc.day.bugs.query(),
+  bugStatus: async (id, status) => trpc.day.bugStatus.mutate({ id, status }),
 };
 
 /** A challenge link carries who challenged you and the score to beat. */

@@ -8,7 +8,8 @@ import { DECREES, DEFAULT_RULES, budgetAsOf, eventsAsOf } from '../../src/shared
 import type { DecreeSpec, EventSpec, Faction } from '../../src/shared/engine';
 import { AUGUR_ODDS } from '../../src/shared/daily';
 import { rulebookStamp } from '../../src/shared/rulebook-stamp';
-import { ACHIEVEMENTS } from '../../src/shared/achievements';
+import { ACHIEVEMENTS, HIDDEN_HOW } from '../../src/shared/achievements';
+import { COIN } from '../../src/client/arlr/coin';
 import {
   castraIcon, coins, flame, MINI, miniKey, pitchfork, settlement, silverPeak, swords, TRIBE_ART,
 } from '../../src/client/arlr/board-art';
@@ -50,7 +51,7 @@ const eventCard = (e: EventSpec) => {
 const decreeCard = (d: DecreeSpec) => {
   const f = FACTION[d.faction];
   const p = typeof d.vars.param === 'number' ? d.vars.param : d.vars.param === 'maxHop' ? 6 : 5;
-  return `<div class="card dc" style="--c:${f.col}"><div class="ct">${d.title}</div><p class="rule-t">${d.text(p)}</p><p class="eff">${d.effect}</p></div>`;
+  return `<div class="card dc" style="--c:${f.col}"><div class="ct">${d.title}</div><p class="rule-t">${d.rule(p).replace(/🪙/g, COIN)}</p><p class="eff">${d.effect}</p></div>`;
 };
 
 // small vector illustrations from the game's art
@@ -83,12 +84,12 @@ add(`${h1('The Campaign at a Glance', 'Liber I')}
 <div class="cols2">
 <div>
 <h2>The goal</h2>
-<p>After ${R.turns} turns, at dusk, your <b>score</b> is your glory, plus the Senate's decree bonus, minus ${R.lostLegionPenalty} for every legion lost. Each day has a target: <b>Caesar's score</b>, the best play our solver found on that map. Everyone plays the same map, the same events and the same decree, so the leaderboard is fair.</p>
+<p>After ${R.turns} turns, at the end of the game, your <b>score</b> is your glory, plus the Senate's decree bonus, minus ${R.lostLegionPenalty} for every legion lost. Each day has a target: <b>Caesar's score</b>, the best play our solver found on that map. Everyone plays the same map, the same events and the same decree, so the leaderboard is fair.</p>
 <h2>A day</h2>
 <ol class="steps">
 <li><b>Read the decree.</b> The Senate's law changes the day's rules or pays a bonus.</li>
 <li><b>Play ten turns.</b> Build, march, fortify, then end the turn. The forecast shows what the tribes will do.</li>
-<li><b>Dusk.</b> Compare your score with Caesar's and your rivals', turn by turn.</li>
+<li><b>End of the game.</b> Compare your score with Caesar's and your rivals', turn by turn.</li>
 <li><b>Vote.</b> Choose the faction whose decree rules tomorrow.</li>
 </ol>
 </div>
@@ -133,7 +134,7 @@ add(`${h1('Your Turn', 'Liber II')}
 <div class="actions">
 <div class="act"><div class="an">I</div><div><b>Build a road</b> from any town already linked to the castra. Pay its milestone price. The far town is now Roman and pays at the end of every turn.</div></div>
 <div class="act"><div class="an">II</div><div><b>March a legion</b> up to ${R.legionRange} roads along your network, once per turn. Tap its standard, then a ringed town. A legion cut off from the castra cannot march.</div></div>
-<div class="act"><div class="an">III</div><div><b>Recruit a legion</b> at the castra: ${R.recruitCost} denarii, then ${R.recruitCostStep} more for each one after. You start with ${R.legions}.</div></div>
+<div class="act"><div class="an">III</div><div><b>Recruit a legion</b> at the castra: the first costs ${R.recruitCost} denarii, and each one after costs ${R.recruitCostStep} more than the last (${[0, 1, 2].map((k) => R.recruitCost + k * R.recruitCostStep).join(', ')}…). You start with ${R.legions}.</div></div>
 <div class="act"><div class="an">IV</div><div><b>Build a garrison</b> in a linked town: ${R.garrisonCost} denarii, then ${R.garrisonCostStep} more each. It never moves and never leaves.</div></div>
 <div class="act"><div class="an">V</div><div><b>End the turn.</b> The events of the turn strike, besieged towns burn, then every linked town pays its glory and denarii.</div></div>
 </div>
@@ -151,7 +152,7 @@ add(`${h1('Threats and Shields', 'Liber II')}
 </div>
 <div>
 <h2>Sieges</h2>
-<p>A town still holding roads or a legion but no longer linked to the castra is <b>besieged</b>. Relink it within ${R.siegeTurns} turns, or it <b>burns</b>: its roads are lost, and every legion inside is lost too (−${R.lostLegionPenalty} each at dusk). A garrisoned town never burns.</p>
+<p>A town still holding roads or a legion but no longer linked to the castra is <b>besieged</b>. Relink it within ${R.siegeTurns} turns, or it <b>burns</b>: its roads are lost, and every legion inside is lost too (−${R.lostLegionPenalty} each from your final score). A garrisoned town never burns.</p>
 ${box('Plan two turns ahead', '<p>Legions march only two roads a turn, and the forecast shows two turns ahead. The good legate moves his legion <i>before</i> the revolt, not after.</p>')}
 </div>
 </div>
@@ -192,15 +193,15 @@ ${box('The Sibylline Books', `<p>On about one night in ${Math.round(1 / AUGUR_OD
 <div>${fig('decree-sheet', 'The decree is shown before your first move; the 📜 banner (a 📜 seal with its bonus, on phones) keeps it at hand all day.')}
 <h2>Four kinds of decree</h2>
 <ul class="tight">
-<li><b>Dusk bonus</b>: glory at dusk for what you have built (hubs, forts, legions home…).</li>
-<li><b>Every turn</b>: glory each turn for holding something (ports, hills…), so <i>when</i> you take it matters.</li>
+<li><b>End of the game</b>: glory once, after turn 10, for what you hold then (hubs, forts, legions home…).</li>
+<li><b>Every turn, adding up</b>: glory at the end of each turn for what you hold (ports, hills…), added up over the day, so <i>when</i> you take it matters.</li>
 <li><b>New rules</b>: costs, shields or limits change for the day.</li>
 <li><b>Events</b>: the Augurs can change the day's events themselves.</li>
 </ul></div>
 </div>`);
 
 // VIII. scoring
-add(`${h1('Dusk: the Score', 'Liber V')}
+add(`${h1('The End of the Game: the Score', 'Liber V')}
 <div class="formula"><span>Score</span> = <span>glory</span> + <span>decree bonus</span> − <span>${R.lostLegionPenalty} × legions lost</span></div>
 <div class="cols2">
 <div>
@@ -208,7 +209,7 @@ add(`${h1('Dusk: the Score', 'Liber V')}
 <p>Caesar's score is the best result our solver found for that day, under the day's decree, playing the same map and events. To plan, the solver simulates the whole day, so in effect it sees further than your 2-turn forecast; it never takes a gambit. It is a strong target, not a perfect one: a sharp legate can beat it. The results page draws your score turn by turn against Caesar's and your rivals'.</p>
 <h2>Leaderboard, rivals and streaks</h2>
 <p>Each day has its leaderboard. Follow rivals to see their curves next to yours, and press <b>Compare</b> to replay both campaigns turn by turn on the map: their roads, forts and legions drawn over yours. Only once you have finished, and only for generals you follow; Caesar's own plan is never shown, so the answer cannot be copied. Playing on consecutive days builds a streak. Older posts can still be played; depending on the subreddit's setting, those scores are flagged as late or kept off the board.</p>
-${box('A worked dusk', `<p>Over ten turns your towns paid <b>212 glory</b>. The decree, <i>Fortified hubs</i>, pays +3 for each of your 4 hubs: <b>+12</b>. One legion was lost in a burning town: <b>−${R.lostLegionPenalty}</b>. Score: 212 + 12 − ${R.lostLegionPenalty} = <b>${212 + 12 - R.lostLegionPenalty}</b>. Caesar scored 230: so close.</p>`)}
+${box('A worked final score', `<p>Over ten turns your towns paid <b>212 glory</b>. The decree, <i>Fortified hubs</i>, pays +3 for each of your 4 hubs: <b>+12</b>. One legion was lost in a burning town: <b>−${R.lostLegionPenalty}</b>. Score: 212 + 12 − ${R.lostLegionPenalty} = <b>${212 + 12 - R.lostLegionPenalty}</b>. Caesar scored 230: so close.</p>`)}
 </div>
 <div>
 <h2>Advice from the old legates</h2>
@@ -241,10 +242,10 @@ ${i === 0 ? `<p class="small" style="color:${FACTION[f].col}"><b>${FACTION[f].mo
 <div class="cards">${part.map(decreeCard).join('')}</div>`));
 }
 
-// honours: the 20 achievements
+// honours: every achievement (hidden ones keep their secret, as in the game)
 add(`${h1('Honours of the Legion', 'Almanac')}
-<p class="small">Twenty-three honours mark a legate's career, in copper, silver and gold. Each is won once and keeps the date it was won and how (tap a won honour on the results page: "Scored 230 against Caesar's 215 in the campaign of 20 November"); the results page shows how many you hold and how rare each one is. None asks more than a hundred campaigns, and no streak is longer than seven days.</p>
-<div class="honours">${[...new Set(ACHIEVEMENTS.map((a) => a.group))].map((g) => `<h3>${g}</h3>${ACHIEVEMENTS.filter((a) => a.group === g).map((a) => `<div class="hon"><span class="hmedal ${a.tier}">${a.glyph}</span><div><b>${a.name}</b> <i>${a.tier}</i><br><span>${a.how}</span></div></div>`).join('')}`).join('')}</div>`);
+<p class="small">${ACHIEVEMENTS.length} honours mark a legate's career, in copper, silver and gold; ${ACHIEVEMENTS.filter((a) => a.hidden).length} of them stay secret until won. Each is won once and keeps the date it was won and how (tap a won honour on the results page: "Scored 230 against Caesar's 215 in the campaign of 20 November"); the results page shows how many you hold and how rare each one is. None asks more than a hundred campaigns, and no streak is longer than seven days.</p>
+<div class="honours">${[...new Set(ACHIEVEMENTS.map((a) => a.group))].map((g) => `<h3>${g}</h3>${ACHIEVEMENTS.filter((a) => a.group === g).map((a) => (a.hidden ? `<div class="hon"><span class="hmedal ${a.tier}">?</span><div><b>???</b> <i>${a.tier}</i><br><span>${HIDDEN_HOW}</span></div></div>` : `<div class="hon"><span class="hmedal ${a.tier}">${a.glyph}</span><div><b>${a.name}</b> <i>${a.tier}</i><br><span>${a.how}</span></div></div>`)).join('')}`).join('')}</div>`);
 
 // back: quick reference
 add(`${h1('Quick Reference', 'Tabula')}
@@ -258,14 +259,14 @@ add(`${h1('Quick Reference', 'Tabula')}
 <tr><td>Glory</td><td>★ a turn from each linked town</td></tr>
 <tr><th colspan="2">Costs</th></tr>
 <tr><td>Road</td><td>terrain (plain 1, forest 2, hills 3) + depth</td></tr>
-<tr><td>Legion</td><td>${R.recruitCost}, then +${R.recruitCostStep} each</td></tr>
-<tr><td>Garrison</td><td>${R.garrisonCost}, then +${R.garrisonCostStep} each</td></tr>
+<tr><td>Legion</td><td>${[0, 1, 2].map((k) => R.recruitCost + k * R.recruitCostStep).join(', ')}… (each one ${R.recruitCostStep} more than the last)</td></tr>
+<tr><td>Garrison</td><td>${[0, 1, 2].map((k) => R.garrisonCost + k * R.garrisonCostStep).join(', ')}… (each one ${R.garrisonCostStep} more than the last)</td></tr>
 <tr><th colspan="2">War</th></tr>
 <tr><td>Legion march</td><td>up to ${R.legionRange} roads, once a turn</td></tr>
 <tr><td>Shield</td><td>legion: roads touching its town · garrison: its town and neighbours</td></tr>
 <tr><td>Rubble</td><td>${R.rubbleTurns} turns before a cut road can be rebuilt</td></tr>
 <tr><td>Siege</td><td>${R.siegeTurns} turns to relink, or the town burns</td></tr>
-<tr><td>Lost legion</td><td>−${R.lostLegionPenalty} at dusk</td></tr>
+<tr><td>Lost legion</td><td>−${R.lostLegionPenalty} at the end of the game</td></tr>
 <tr><td>Forecast</td><td>${R.eventLookahead} turns ahead</td></tr>
 </table>
 </div>
@@ -355,6 +356,7 @@ figcaption{font-size:8.6pt;font-style:italic;color:#5a4a32;margin-top:1.2mm}
 .card .cw{font-size:8.2pt;font-style:italic;color:#6a5a40}
 .card.dc{border-top:3pt solid var(--c)} .card.dc .ct{color:var(--c)}
 .card .rule-t{font-weight:600} .card .eff{font-style:italic;color:#4a3a22}
+.dcoin{display:inline-block;width:1em;height:1em;vertical-align:-.14em;overflow:visible} .dcoin circle{fill:#f2c230;stroke:#1d1409;stroke-width:1.1} .dcoin text{font:bold 7px Georgia,serif;text-anchor:middle;fill:#8a5a0c}
 .icons-row{display:flex;justify-content:center;gap:6mm;margin:6mm 0 2mm}
 /* cover */
 .cover .inner{inset:12mm 13mm}

@@ -92,7 +92,7 @@ function bump(el: HTMLElement | null) {
 export type Payment = { town: number; glory: number; denarii: number; hop: number };
 export type EndTurnFx = {
   cut: number[]; lost: number[]; burned: number[];
-  /** Paying towns (the castra's base income too, as town = castra with glory 0). */
+  /** Paying towns (the castra's base income too, as town = castra with glory 0; a debt as negative denarii at hop −1). See pay.ts. */
   pays: Payment[];
   /** Glory not tied to a town (the decree's per-turn share), shown at the Decree button. */
   extraGlory: number;
@@ -106,7 +106,8 @@ export type EndTurnFx = {
  * The end of a turn, in three overlapping beats (about 1.3 s):
  * 1. strike: each cut road (as it stood) flashes red, shudders, scatters stones and fades over its rubble;
  * 2. consequence: towns lost send red rings and "cut off" (burned: "burned");
- * 3. reward: +★ / +coin rise from the castra, then town by town outwards; the bar's counters tick as each appears.
+ * 3. reward: a debt due (loan instalment) leaves the castra first as a red −coin, then +★ / +coin rise from the castra and
+ *    town by town outwards; the bar's counters tick as each appears, so the treasury never shows more than it will hold.
  */
 export function fxEndTurn(root: HTMLElement, e: EndTurnFx): number {
   fxFinish();
@@ -184,7 +185,7 @@ export function fxEndTurn(root: HTMLElement, e: EndTurnFx): number {
     rising.push({ x, y });
     const both = p.glory && p.denarii;
     if (p.glory) { floater(L, x - (both ? 30 * u : 0), y, `+${p.glory}★`, 'g', t, u); later(t + 170, () => { set('glory', shown.glory + p.glory); bump(ctr('glory')); e.tick?.(i); }); }
-    if (p.denarii) { floater(L, x + (both ? 38 * u : 0), y, `+${p.denarii}`, 'c', t + 60, u, true); later(t + 230, () => { set('denarii', shown.denarii + p.denarii); bump(ctr('denarii')); }); }
+    if (p.denarii) { floater(L, x + (both ? 38 * u : 0), y, p.denarii > 0 ? `+${p.denarii}` : `−${-p.denarii}`, p.denarii > 0 ? 'c' : 'r', t + 60, u, true); later(t + 230, () => { set('denarii', shown.denarii + p.denarii); bump(ctr('denarii')); }); }
   });
   const tEnd = t0 + pays.length * gap + 100;
   later(tEnd, () => {
